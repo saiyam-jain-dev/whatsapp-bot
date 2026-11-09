@@ -211,8 +211,6 @@ async function replyWithTyping(sock, jid, text, quotedMsg) {
  * Extracts target text for TTS conversion from command args, quoted message, or chat history.
  */
 function extractTextForTts(msg, commandArgs, remoteJid) {
-  // If user passed explicit text after command (e.g. "@sam tts hello world")
-  // Strip out command prefix if needed
   let cleanedArgs = (commandArgs || '').replace(/^(into|to)?\s*(audio|voice\s*note|voice|speech)[:\s]*/i, '').trim();
   if (cleanedArgs.length > 0) {
     return cleanedArgs;
@@ -329,17 +327,24 @@ export async function handleMessage(sock, msg) {
   }
 
   // Determine trigger:
-  // 1. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
-  // 2. Starts with "!" (e.g. "!ai", "!s", "!tts", "!ping")
-  // 3. Bot is natively @mentioned or replied to in a group
-  // 4. In direct 1-on-1 private chat (unless fromMe without a trigger command)
+  // 1. Starts with @explaintts (replies directly in voice audio)
+  // 2. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
+  // 3. Starts with "!" (e.g. "!ai", "!s", "!tts", "!ping")
+  // 4. Bot is natively @mentioned or replied to in a group
+  // 5. In direct 1-on-1 private chat
   const defaultPrefix = config.prefix || '!';
   const samPrefixRegex = /^@sam[:\s]*/i;
+  const explainTtsRegex = /^@explaintts[:\s]*/i;
 
   let isTriggered = false;
+  let isExplainTts = false;
   let commandBody = '';
 
-  if (samPrefixRegex.test(trimmedText)) {
+  if (explainTtsRegex.test(trimmedText)) {
+    isTriggered = true;
+    isExplainTts = true;
+    commandBody = trimmedText.replace(explainTtsRegex, '').trim();
+  } else if (samPrefixRegex.test(trimmedText)) {
     isTriggered = true;
     commandBody = trimmedText.replace(samPrefixRegex, '').trim();
   } else if (trimmedText.startsWith(defaultPrefix)) {
@@ -359,11 +364,92 @@ export async function handleMessage(sock, msg) {
   const firstWord = commandBody.split(/\s+/)[0]?.toLowerCase();
   const commandArgs = commandBody.slice(firstWord.length).trim();
 
-  // 1. Help command (@sam help, @sam menu, !help, !menu)
+  if (firstWord === 'explaintts') {
+    isExplainTts = true;
+    commandBody = commandArgs;
+  }
+
+  // 1. Explain in Voice Note (@explaintts <prompt> or @sam explaintts <prompt>)
+  if (isExplainTts) {
+    console.log(`[ExplainTTS] Triggered by ${senderName} (${remoteJid}) with prompt: "${commandBody}"`);
+
+    // Resolve prompt from input or quoted message
+    let prompt = commandBody;
+    const quoted = contextInfo?.quotedMessage;
+    if (quoted) {
+      const unwrappedQuoted = unwrapMessage(quoted);
+      const qText =
+        unwrappedQuoted?.conversation ||
+        unwrappedQuoted?.extendedTextMessage?.text ||
+        unwrappedQuoted?.imageMessage?.caption ||
+        '';
+      if (qText) {
+        prompt = prompt
+          ? `Regarding this message "${qText}": ${prompt}`
+          : `Explain this message clearly in simple terms: "${qText}"`;
+      }
+    }
+
+    if (!prompt) {
+      prompt = 'Explain something interesting in 2 to 3 sentences.';
+    }
+
+    try {
+      await sock.sendPresenceUpdate('recording', remoteJid);
+
+      // Generate conversational explanation meant to be spoken aloud
+      const spokenPrompt = `${prompt} (Answer concisely in 2 to 4 direct, conversational sentences meant to be spoken aloud. Do not use markdown asterisks, bullet points, or lists).`;
+      const aiAnswer = await askAI({
+        chatId: remoteJid,
+        senderName,
+        prompt: spokenPrompt,
+        isGroup
+      });
+
+      // Transcode AI explanation to WhatsApp Opus OGG voice note
+      const cleanTextForSpeech = aiAnswer.replace(/[*_~`#]/g, '').trim();
+      const voiceBuffer = await textToVoiceNote(cleanTextForSpeech);
+
+      await sock.sendPresenceUpdate('paused', remoteJid);
+
+      // Send the audio voice note
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          { audio: voiceBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true },
+          { quoted: msg }
+        );
+      } catch (voiceErr) {
+        console.warn('[ExplainTTS] Quoted voice send failed, falling back to direct send:', voiceErr.message);
+        await sock.sendMessage(
+          remoteJid,
+          { audio: voiceBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true }
+        );
+      }
+
+      // Also deliver text version with SamAi header
+      memory.addMessage(remoteJid, {
+        sender: config.botName,
+        senderJid: botJid,
+        text: aiAnswer,
+        isBot: true
+      });
+
+      await replyWithTyping(sock, remoteJid, `🎙️ *Voice Explanation:*\n\n${aiAnswer}`, msg);
+      console.log('[ExplainTTS] Successfully sent audio voice note and text explanation!');
+      return;
+    } catch (err) {
+      console.error('[ExplainTTS Error]:', err.message);
+      return replyWithTyping(sock, remoteJid, `Could not generate voice explanation: ${err.message}`, msg);
+    }
+  }
+
+  // 2. Help command (@sam help, @sam menu, !help, !menu)
   if (firstWord === 'help' || firstWord === 'menu') {
     const helpText =
       `*Commands (works with @sam or !):*\n` +
       `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
+      `• *@explaintts <prompt>* - Ask any question and get an audio voice note answer\n` +
       `• *@sam tts <text>* or *!tts* - Convert text to voice note\n` +
       `• *@sam s* or *!s* - Turn photo, GIF, or video into sticker\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
@@ -371,11 +457,11 @@ export async function handleMessage(sock, msg) {
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
       `*Tips:*\n` +
-      `Reply to any message with *@sam tts* for voice, or reply to any photo/GIF with *@sam s* for stickers!`;
+      `Type *@explaintts <your question>* to have SamAi explain anything directly in a WhatsApp voice note!`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
-  // 2. Ping command (@sam ping, !ping)
+  // 3. Ping command (@sam ping, !ping)
   if (firstWord === 'ping') {
     const startTime = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
     const latency = Math.max(5, Date.now() - startTime);
@@ -388,7 +474,7 @@ export async function handleMessage(sock, msg) {
     return replyWithTyping(sock, remoteJid, pingText, msg);
   }
 
-  // 3. TTS / Text to Audio Command (@sam tts, @sam voice, @sam say, @sam convert to audio)
+  // 4. TTS / Text to Audio Command (@sam tts, @sam voice, @sam say, @sam convert to audio)
   if (isTtsIntent(commandBody, firstWord)) {
     console.log(`[TTS Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
     const targetText = extractTextForTts(msg, commandArgs, remoteJid);
@@ -431,7 +517,7 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 4. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
+  // 5. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
   if (isStickerIntent(commandBody) || isStickerIntent(firstWord)) {
     console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
     const mediaBuffer = await getMediaBuffer(msg, remoteJid);
@@ -467,20 +553,20 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 5. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 6. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 6. Clear command (@sam clear, !clear)
+  // 7. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 7. Conversational AI Prompt
+  // 8. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;

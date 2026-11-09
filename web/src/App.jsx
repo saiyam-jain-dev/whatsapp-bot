@@ -741,7 +741,12 @@ export default function App() {
               {
                 cmd: `@sam <prompt> or !ai <prompt>`,
                 title: 'Chat & AI Questions',
-                desc: 'Ask @sam anything directly, get ideas, recipes, code, jokes, or answers.'
+                desc: 'Ask @sam anything directly, get ideas, recipes, code, jokes, or answers in text.'
+              },
+              {
+                cmd: `@explaintts <prompt>`,
+                title: 'AI Voice Explanation Note',
+                desc: 'Ask any question with @explaintts to get an AI answer delivered as a real WhatsApp audio voice note.'
               },
               {
                 cmd: `@sam tts <text> or !tts`,
