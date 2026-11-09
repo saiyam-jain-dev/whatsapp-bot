@@ -1,0 +1,36 @@
+{
+  "name": "whatsapp-ai-bot",
+  "version": "1.0.0",
+  "description": "Personal WhatsApp AI Assistant with Vite Web Dashboard (Groq Llama 3.3 70B & Baileys)",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "build:web": "npm --prefix web run build",
+    "dev:web": "npm --prefix web run dev"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "ai-bot",
+    "groq",
+    "llama3",
+    "vite",
+    "react",
+    "dashboard"
+  ],
+  "author": "Saiyam Jain",
+  "license": "MIT",
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "cors": "^2.8.5",
+    "dotenv": "^18.0.10",
+    "express": "^5.2.1",
+    "groq-sdk": "^1.6.0",
+    "pino": "^10.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.35.5"
+  }
+}
