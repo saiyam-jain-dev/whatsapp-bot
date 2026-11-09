@@ -12,6 +12,7 @@ export const config = {
   botName: process.env.BOT_NAME || 'Buddy',
   prefix: process.env.COMMAND_PREFIX || '!',
   groqApiKey: process.env.GROQ_API_KEY || '',
+  groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
   contextLimit: parseInt(process.env.CONTEXT_LIMIT || '15', 10),
   typingDelayMin: parseInt(process.env.TYPING_DELAY_MIN || '1000', 10),

@@ -32,28 +32,41 @@ export async function askAI({ chatId, senderName, prompt, isGroup = false }) {
   userContent += `${senderName || 'Friend'}: ${prompt}`;
 
   if (config.groqApiKey) {
-    try {
-      if (!groqClient) {
-        groqClient = new Groq({ apiKey: config.groqApiKey });
-      }
+    if (!groqClient) {
+      groqClient = new Groq({ apiKey: config.groqApiKey });
+    }
 
-      const response = await groqClient.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-          { role: 'system', content: getSystemPrompt() },
-          { role: 'user', content: userContent }
-        ],
-        temperature: 0.7,
-        max_tokens: 800
-      });
+    const candidateModels = [
+      config.groqModel || 'openai/gpt-oss-120b',
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
+      'qwen/qwen3.8-27b'
+    ];
 
-      const reply = response.choices[0]?.message?.content?.trim();
-      return reply || "Couldn't generate a response. Try again.";
-    } catch (err) {
-      console.error('[AI Groq Error]:', err.message);
-      if (!config.geminiApiKey) {
-        return `Groq error: ${err.message}`;
+    const uniqueModels = [...new Set(candidateModels)];
+
+    for (const model of uniqueModels) {
+      try {
+        const response = await groqClient.chat.completions.create({
+          model,
+          messages: [
+            { role: 'system', content: getSystemPrompt() },
+            { role: 'user', content: userContent }
+          ],
+          temperature: 0.7,
+          max_tokens: 800
+        });
+
+        const reply = response.choices[0]?.message?.content?.trim();
+        if (reply) return reply;
+      } catch (err) {
+        console.warn(`[AI Groq Attempt with ${model} failed]:`, err.message);
+        // Continue to fallback model
       }
+    }
+
+    if (!config.geminiApiKey) {
+      return "Groq couldn't generate a response. Check model availability or try again.";
     }
   }
 
