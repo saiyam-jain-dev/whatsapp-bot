@@ -5,22 +5,88 @@ import { askAI, summarizeChat, transcribeAudio } from './ai.js';
 import { createSticker } from './sticker.js';
 
 /**
+ * Unwraps nested WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, edited).
+ */
+function unwrapMessage(content) {
+  if (!content) return null;
+  let unwrapped = content;
+  for (let i = 0; i < 5; i++) {
+    if (unwrapped.ephemeralMessage?.message) {
+      unwrapped = unwrapped.ephemeralMessage.message;
+    } else if (unwrapped.viewOnceMessage?.message) {
+      unwrapped = unwrapped.viewOnceMessage.message;
+    } else if (unwrapped.viewOnceMessageV2?.message) {
+      unwrapped = unwrapped.viewOnceMessageV2.message;
+    } else if (unwrapped.viewOnceMessageV2Extension?.message) {
+      unwrapped = unwrapped.viewOnceMessageV2Extension.message;
+    } else if (unwrapped.documentWithCaptionMessage?.message) {
+      unwrapped = unwrapped.documentWithCaptionMessage.message;
+    } else if (unwrapped.editedMessage?.message) {
+      unwrapped = unwrapped.editedMessage.message;
+    } else {
+      break;
+    }
+  }
+  return unwrapped;
+}
+
+/**
+ * Finds image media in either current message or quoted message.
+ */
+function findImageInMessage(msg) {
+  const root = unwrapMessage(msg.message);
+
+  // 1. Direct message attachment
+  if (root?.imageMessage) {
+    return { media: root.imageMessage, type: 'image' };
+  }
+  if (root?.documentMessage && root.documentMessage.mimetype?.startsWith('image/')) {
+    return { media: root.documentMessage, type: 'document' };
+  }
+  if (root?.stickerMessage) {
+    return { media: root.stickerMessage, type: 'sticker' };
+  }
+
+  // 2. Quoted message attachment
+  const quoted = root?.extendedTextMessage?.contextInfo?.quotedMessage;
+  if (quoted) {
+    const unwrappedQuoted = unwrapMessage(quoted);
+    if (unwrappedQuoted?.imageMessage) {
+      return { media: unwrappedQuoted.imageMessage, type: 'image' };
+    }
+    if (unwrappedQuoted?.documentMessage && unwrappedQuoted.documentMessage.mimetype?.startsWith('image/')) {
+      return { media: unwrappedQuoted.documentMessage, type: 'document' };
+    }
+    if (unwrappedQuoted?.stickerMessage) {
+      return { media: unwrappedQuoted.stickerMessage, type: 'sticker' };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Downloads image buffer from either the current message or a quoted message.
  */
 async function getImageBuffer(msg) {
-  const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-  const imageMsg = msg.message?.imageMessage || quoted?.imageMessage;
-  if (!imageMsg) return null;
+  const target = findImageInMessage(msg);
+  if (!target) {
+    console.log('[Sticker] No image found in current or quoted message');
+    return null;
+  }
 
   try {
-    const stream = await downloadContentFromMessage(imageMsg, 'image');
+    console.log(`[Sticker] Found media type: ${target.type}. Starting download...`);
+    const stream = await downloadContentFromMessage(target.media, target.type);
     const chunks = [];
     for await (const chunk of stream) {
       chunks.push(chunk);
     }
-    return Buffer.concat(chunks);
+    const buffer = Buffer.concat(chunks);
+    console.log(`[Sticker] Download completed. Buffer size: ${buffer.length} bytes`);
+    return buffer;
   } catch (err) {
-    console.error('[Image Download Error]:', err.message);
+    console.error('[Sticker Download Error]:', err.message);
     return null;
   }
 }
@@ -29,8 +95,11 @@ async function getImageBuffer(msg) {
  * Downloads audio buffer from either the current message or a quoted message.
  */
 async function getAudioBuffer(msg) {
-  const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-  const audioMsg = msg.message?.audioMessage || quoted?.audioMessage;
+  const root = unwrapMessage(msg.message);
+  const quoted = root?.extendedTextMessage?.contextInfo?.quotedMessage;
+  const unwrappedQuoted = unwrapMessage(quoted);
+
+  const audioMsg = root?.audioMessage || unwrappedQuoted?.audioMessage;
   if (!audioMsg) return null;
 
   try {
@@ -81,27 +150,32 @@ export async function handleMessage(sock, msg) {
   const senderJid = isGroup ? (msg.key.participant || msg.participant || '') : remoteJid;
   const senderName = msg.pushName || 'Friend';
 
-  const messageContent = msg.message;
-  if (!messageContent) return;
+  const rootContent = unwrapMessage(msg.message);
+  if (!rootContent) return;
 
   // Extract text body
   const rawText =
-    messageContent.conversation ||
-    messageContent.extendedTextMessage?.text ||
-    messageContent.imageMessage?.caption ||
-    messageContent.videoMessage?.caption ||
-    messageContent.documentMessage?.caption ||
+    rootContent.conversation ||
+    rootContent.extendedTextMessage?.text ||
+    rootContent.imageMessage?.caption ||
+    rootContent.videoMessage?.caption ||
+    rootContent.documentMessage?.caption ||
     '';
 
   const trimmedText = rawText.trim();
 
   // Check quoted context
-  const contextInfo = messageContent.extendedTextMessage?.contextInfo;
+  const contextInfo = rootContent.extendedTextMessage?.contextInfo;
   const mentionedJids = contextInfo?.mentionedJid || [];
   const isMentioned = mentionedJids.includes(botJid) || (botJidRaw && mentionedJids.includes(botJidRaw));
   const isReplyToBot = contextInfo?.participant?.includes(botJid.split('@')[0]) || false;
 
-  // Always record user messages into memory for context tracking
+  // Debug logging
+  if (trimmedText || rootContent.imageMessage) {
+    console.log(`[Msg] From: ${senderName} (${remoteJid}) | Text: "${trimmedText}" | Image: ${Boolean(rootContent.imageMessage)} | fromMe: ${msg.key.fromMe}`);
+  }
+
+  // Record user messages into memory for context tracking
   if (trimmedText && !msg.key.fromMe) {
     memory.addMessage(remoteJid, {
       sender: senderName,
@@ -112,7 +186,7 @@ export async function handleMessage(sock, msg) {
   }
 
   // Voice note handling
-  const isAudioMsg = Boolean(messageContent.audioMessage);
+  const isAudioMsg = Boolean(rootContent.audioMessage);
   if (isAudioMsg && (!isGroup || isMentioned || isReplyToBot)) {
     const audioData = await getAudioBuffer(msg);
     if (audioData) {
@@ -141,7 +215,7 @@ export async function handleMessage(sock, msg) {
   // 1. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
   // 2. Starts with "!" (e.g. "!ai", "!s", "!summary", "!ping")
   // 3. Bot is natively @mentioned or replied to in a group
-  // 4. In direct 1-on-1 private chat
+  // 4. In direct 1-on-1 private chat (unless fromMe without a trigger command)
   const defaultPrefix = config.prefix || '!';
   const samPrefixRegex = /^@sam[:\s]*/i;
 
@@ -158,8 +232,8 @@ export async function handleMessage(sock, msg) {
     isTriggered = true;
     // Strip native mention if present
     commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
-  } else if (!isGroup) {
-    // Direct message
+  } else if (!isGroup && !msg.key.fromMe) {
+    // Direct message from someone else
     isTriggered = true;
     commandBody = trimmedText;
   }
@@ -201,6 +275,7 @@ export async function handleMessage(sock, msg) {
 
   // 3. Sticker command (@sam s, @sam sticker, !s, !sticker)
   if (firstWord === 's' || firstWord === 'sticker') {
+    console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid})`);
     const imgBuffer = await getImageBuffer(msg);
     if (!imgBuffer) {
       return replyWithTyping(
@@ -212,12 +287,17 @@ export async function handleMessage(sock, msg) {
     }
 
     try {
+      console.log(`[Sticker] Converting image (${imgBuffer.length} bytes) to WebP sticker...`);
       const stickerBuffer = await createSticker(imgBuffer, {
         pack: `${config.botName} Pack`,
         author: senderName
       });
-      return await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
+      console.log(`[Sticker] Sticker created (${stickerBuffer.length} bytes). Sending to ${remoteJid}...`);
+      await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
+      console.log(`[Sticker] Successfully sent sticker!`);
+      return;
     } catch (err) {
+      console.error('[Sticker Processing Error]:', err.message);
       return replyWithTyping(sock, remoteJid, `Could not generate sticker: ${err.message}`, msg);
     }
   }
@@ -236,7 +316,6 @@ export async function handleMessage(sock, msg) {
   }
 
   // 6. Conversational AI Prompt
-  // If firstWord is "ai" or "ask", prompt is the remaining args. Otherwise whole commandBody is the prompt.
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;
