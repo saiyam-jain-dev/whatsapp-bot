@@ -52,14 +52,16 @@ The console will display the terminal QR code, and start the Vite web dashboard 
 
 ## Commands & Usage
 
-| Command | Usage | Description |
+All commands can be invoked using either `@sam` or the traditional `!` prefix:
+
+| Command | Usage Example | Description |
 |---|---|---|
-| `!ai <prompt>` | `!ai what movie should we watch?` | Ask the bot a question (or simply @mention the bot) |
-| `!s` or `!sticker` | Send image with caption `!s`, or reply to an image with `!s` | Converts the photo into a WhatsApp sticker |
-| `!summary` or `!tldr` | `!summary` | Generates a 3-5 bullet point summary of recent group chat |
-| `!ping` | `!ping` | Checks bot status, connection latency, and stored memory count |
-| `!clear` | `!clear` | Clears recent conversation memory for the current chat |
-| `!help` | `!help` | Displays command menu |
+| `@sam <prompt>` or `!ai <prompt>` | `@sam what movie should we watch tonight?` | Ask @sam anything directly (also answers when replied to) |
+| `@sam s` or `!s` | Send image with caption `@sam s`, or reply to an image with `@sam s` | Converts the photo into a square WhatsApp sticker |
+| `@sam summary` or `!summary` | `@sam summary` or `@sam tldr` | Generates a 3-5 bullet point summary of recent group chat |
+| `@sam ping` or `!ping` | `@sam ping` | Checks bot status, connection latency, and stored memory count |
+| `@sam clear` or `!clear` | `@sam clear` | Clears recent conversation memory for the current chat |
+| `@sam help` or `!help` | `@sam help` | Displays the command menu |
 
 ---
 

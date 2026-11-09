@@ -94,7 +94,6 @@ export async function handleMessage(sock, msg) {
     '';
 
   const trimmedText = rawText.trim();
-  const lowerText = trimmedText.toLowerCase();
 
   // Check quoted context
   const contextInfo = messageContent.extendedTextMessage?.contextInfo;
@@ -112,78 +111,7 @@ export async function handleMessage(sock, msg) {
     });
   }
 
-  // Handle command prefix
-  const prefix = config.prefix || '!';
-  const isCommand = trimmedText.startsWith(prefix);
-  const commandBody = isCommand ? trimmedText.slice(prefix.length).trim() : '';
-  const commandName = commandBody.split(/\s+/)[0]?.toLowerCase();
-  const commandArgs = commandBody.slice(commandName.length).trim();
-
-  // 1. Help command
-  if (isCommand && (commandName === 'help' || commandName === 'menu')) {
-    const helpText =
-      `*🤖 ${config.botName} - WhatsApp AI Assistant*\n\n` +
-      `*Commands:*\n` +
-      `• *${prefix}ai <prompt>* - Ask a question directly\n` +
-      `• *${prefix}s* or *${prefix}sticker* - Convert image to sticker\n` +
-      `• *${prefix}summary* or *${prefix}tldr* - Summarize recent group chat\n` +
-      `• *${prefix}ping* - Check bot connection and latency\n` +
-      `• *${prefix}clear* - Clear recent chat context\n\n` +
-      `*Group Chat Tips:*\n` +
-      `In groups, I only respond when you @mention me, reply to my message, or use a *${prefix}* command. Otherwise I keep quiet and remember the context so you can ask me questions anytime.`;
-    return replyWithTyping(sock, remoteJid, helpText, msg);
-  }
-
-  // 2. Ping command
-  if (isCommand && commandName === 'ping') {
-    const startTime = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
-    const latency = Math.max(5, Date.now() - startTime);
-    const storedCount = memory.getRecentMessages(remoteJid).length;
-    const pingText =
-      `*Pong!* 🏓\n` +
-      `• Status: Online\n` +
-      `• Latency: ~${latency}ms\n` +
-      `• Context memory: ${storedCount} messages stored for this chat.`;
-    return replyWithTyping(sock, remoteJid, pingText, msg);
-  }
-
-  // 3. Sticker command
-  if (isCommand && (commandName === 's' || commandName === 'sticker')) {
-    const imgBuffer = await getImageBuffer(msg);
-    if (!imgBuffer) {
-      return replyWithTyping(
-        sock,
-        remoteJid,
-        `Send an image with *${prefix}s* as the caption, or reply to an image with *${prefix}s* to make a sticker!`,
-        msg
-      );
-    }
-
-    try {
-      const stickerBuffer = await createSticker(imgBuffer, {
-        pack: `${config.botName} Pack`,
-        author: senderName
-      });
-      return await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
-    } catch (err) {
-      return replyWithTyping(sock, remoteJid, `Could not generate sticker: ${err.message}`, msg);
-    }
-  }
-
-  // 4. Summary / TLDR command
-  if (isCommand && (commandName === 'summary' || commandName === 'tldr')) {
-    await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
-    const summary = await summarizeChat(remoteJid);
-    return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
-  }
-
-  // 5. Clear command
-  if (isCommand && commandName === 'clear') {
-    memory.clear(remoteJid);
-    return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
-  }
-
-  // 6. Voice note handling
+  // Voice note handling
   const isAudioMsg = Boolean(messageContent.audioMessage);
   if (isAudioMsg && (!isGroup || isMentioned || isReplyToBot)) {
     const audioData = await getAudioBuffer(msg);
@@ -209,28 +137,118 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 7. Decide whether to trigger AI response
-  let promptText = '';
-  let shouldReply = false;
+  // Determine trigger:
+  // 1. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
+  // 2. Starts with "!" (e.g. "!ai", "!s", "!summary", "!ping")
+  // 3. Bot is natively @mentioned or replied to in a group
+  // 4. In direct 1-on-1 private chat
+  const defaultPrefix = config.prefix || '!';
+  const samPrefixRegex = /^@sam[:\s]*/i;
 
-  if (isCommand && (commandName === 'ai' || commandName === 'ask')) {
-    shouldReply = true;
-    promptText = commandArgs;
-  } else if (!isGroup) {
-    // In direct 1-on-1 private chat, reply to all text messages
-    shouldReply = true;
-    promptText = trimmedText;
+  let isTriggered = false;
+  let commandBody = '';
+
+  if (samPrefixRegex.test(trimmedText)) {
+    isTriggered = true;
+    commandBody = trimmedText.replace(samPrefixRegex, '').trim();
+  } else if (trimmedText.startsWith(defaultPrefix)) {
+    isTriggered = true;
+    commandBody = trimmedText.slice(defaultPrefix.length).trim();
   } else if (isMentioned || isReplyToBot) {
-    // In groups, trigger when bot is tagged or replied to
-    shouldReply = true;
-    // Strip the bot mention string if present
-    promptText = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
-    if (!promptText) {
-      promptText = 'Hey! What can I help you with?';
+    isTriggered = true;
+    // Strip native mention if present
+    commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
+  } else if (!isGroup) {
+    // Direct message
+    isTriggered = true;
+    commandBody = trimmedText;
+  }
+
+  if (!isTriggered) return;
+
+  const firstWord = commandBody.split(/\s+/)[0]?.toLowerCase();
+  const commandArgs = commandBody.slice(firstWord.length).trim();
+
+  // 1. Help command (@sam help, @sam menu, !help, !menu)
+  if (firstWord === 'help' || firstWord === 'menu') {
+    const helpText =
+      `*🤖 ${config.botName} - WhatsApp AI Assistant*\n\n` +
+      `*Commands (works with @sam or !):*\n` +
+      `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
+      `• *@sam s* or *!s* - Turn photo into a sticker (as caption or reply)\n` +
+      `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
+      `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
+      `• *@sam clear* or *!clear* - Clear recent chat context\n` +
+      `• *@sam help* or *!help* - Show this menu\n\n` +
+      `*Group Chat Behavior:*\n` +
+      `In groups, I only respond when you type *@sam*, use a *!* command, or reply directly to me. Otherwise I stay quiet and keep track of chat context!`;
+    return replyWithTyping(sock, remoteJid, helpText, msg);
+  }
+
+  // 2. Ping command (@sam ping, !ping)
+  if (firstWord === 'ping') {
+    const startTime = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
+    const latency = Math.max(5, Date.now() - startTime);
+    const storedCount = memory.getRecentMessages(remoteJid).length;
+    const pingText =
+      `*Pong!* 🏓\n` +
+      `• Bot: ${config.botName}\n` +
+      `• Status: Online\n` +
+      `• Latency: ~${latency}ms\n` +
+      `• Context memory: ${storedCount} messages stored for this chat.`;
+    return replyWithTyping(sock, remoteJid, pingText, msg);
+  }
+
+  // 3. Sticker command (@sam s, @sam sticker, !s, !sticker)
+  if (firstWord === 's' || firstWord === 'sticker') {
+    const imgBuffer = await getImageBuffer(msg);
+    if (!imgBuffer) {
+      return replyWithTyping(
+        sock,
+        remoteJid,
+        `Send an image with *@sam s* or *!s* as the caption, or reply to any photo with *@sam s* to make a sticker!`,
+        msg
+      );
+    }
+
+    try {
+      const stickerBuffer = await createSticker(imgBuffer, {
+        pack: `${config.botName} Pack`,
+        author: senderName
+      });
+      return await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
+    } catch (err) {
+      return replyWithTyping(sock, remoteJid, `Could not generate sticker: ${err.message}`, msg);
     }
   }
 
-  if (shouldReply && promptText) {
+  // 4. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  if (firstWord === 'summary' || firstWord === 'tldr') {
+    await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
+    const summary = await summarizeChat(remoteJid);
+    return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
+  }
+
+  // 5. Clear command (@sam clear, !clear)
+  if (firstWord === 'clear') {
+    memory.clear(remoteJid);
+    return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
+  }
+
+  // 6. Conversational AI Prompt
+  // If firstWord is "ai" or "ask", prompt is the remaining args. Otherwise whole commandBody is the prompt.
+  let promptText = '';
+  if (firstWord === 'ai' || firstWord === 'ask') {
+    promptText = commandArgs;
+  } else {
+    promptText = commandBody;
+  }
+
+  if (!promptText && (isMentioned || isReplyToBot)) {
+    promptText = 'Hey! What can I help you with?';
+  }
+
+  if (promptText) {
     const aiAnswer = await askAI({
       chatId: remoteJid,
       senderName,

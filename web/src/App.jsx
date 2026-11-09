@@ -25,7 +25,7 @@ export default function App() {
     uptimeSeconds: 0
   });
   const [config, setConfig] = useState({
-    botName: 'Buddy',
+    botName: '@sam',
     prefix: '!',
     contextLimit: 15,
     hasGroqKey: false,
@@ -739,34 +739,34 @@ export default function App() {
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
             {[
               {
-                cmd: `${config.prefix}ai <prompt>`,
-                title: 'Direct AI Prompt',
-                desc: 'Ask the bot a question directly or prompt it for information, recipes, code, or ideas.'
+                cmd: `@sam <prompt> or !ai <prompt>`,
+                title: 'Chat & AI Questions',
+                desc: 'Ask @sam anything directly, get ideas, recipes, code, jokes, or answers.'
               },
               {
-                cmd: `${config.prefix}s or ${config.prefix}sticker`,
+                cmd: `@sam s or !s`,
                 title: 'Sticker Generator',
-                desc: 'Send an image with this caption, or reply to any photo with !s to instantly turn it into a 512x512 WhatsApp sticker.'
+                desc: 'Send an image with @sam s as caption, or reply to any photo with @sam s to turn it into a WhatsApp sticker.'
               },
               {
-                cmd: `${config.prefix}summary or ${config.prefix}tldr`,
-                title: 'Group Chat Catch-Up',
+                cmd: `@sam summary or !summary`,
+                title: 'Group Catch-Up (TL;DR)',
                 desc: 'Reads the rolling memory of recent group messages and produces a crisp 3 to 5 bullet summary.'
               },
               {
-                cmd: `${config.prefix}ping`,
+                cmd: `@sam ping or !ping`,
                 title: 'Health Check',
                 desc: 'Returns online status, WebSocket round-trip latency, and current context message count.'
               },
               {
-                cmd: `${config.prefix}clear`,
+                cmd: `@sam clear or !clear`,
                 title: 'Reset Memory',
                 desc: 'Clears the recorded conversation history for the current group or direct chat.'
               },
               {
-                cmd: `${config.prefix}help`,
+                cmd: `@sam help or !help`,
                 title: 'Menu / Help',
-                desc: 'Prints the formatted command menu and tips for friend group chats.'
+                desc: 'Prints the formatted command menu and instructions for friend group chats.'
               }
             ].map((card, i) => (
               <div
