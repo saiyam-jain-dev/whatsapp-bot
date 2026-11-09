@@ -179,6 +179,8 @@ async function getAudioBuffer(msg) {
 
 /**
  * Simulates human typing before delivering text message.
+ * Formats every outgoing text response with the custom brand heading:
+ * *SamAi- bot by sammy*
  */
 async function replyWithTyping(sock, jid, text, quotedMsg) {
   try {
@@ -190,7 +192,16 @@ async function replyWithTyping(sock, jid, text, quotedMsg) {
     await new Promise(resolve => setTimeout(resolve, delay));
 
     await sock.sendPresenceUpdate('paused', jid);
-    return await sock.sendMessage(jid, { text }, { quoted: quotedMsg });
+
+    const heading = '*SamAi- bot by sammy*';
+    const divider = '────────────────────';
+    let formattedText = text ? text.trim() : '';
+
+    if (!formattedText.startsWith(heading)) {
+      formattedText = `${heading}\n${divider}\n${formattedText}`;
+    }
+
+    return await sock.sendMessage(jid, { text: formattedText }, { quoted: quotedMsg });
   } catch (err) {
     console.error('[Send Message Error]:', err.message);
   }
@@ -351,17 +362,16 @@ export async function handleMessage(sock, msg) {
   // 1. Help command (@sam help, @sam menu, !help, !menu)
   if (firstWord === 'help' || firstWord === 'menu') {
     const helpText =
-      `*🤖 ${config.botName} - WhatsApp AI Assistant*\n\n` +
       `*Commands (works with @sam or !):*\n` +
       `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
-      `• *@sam tts <text>* or *!tts* (or "@sam convert to audio") - Convert text to voice note\n` +
-      `• *@sam s* or *!s* - Turn photo, GIF, or short video into a sticker\n` +
+      `• *@sam tts <text>* or *!tts* - Convert text to voice note\n` +
+      `• *@sam s* or *!s* - Turn photo, GIF, or video into sticker\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
-      `*Voice Note (TTS) Tips:*\n` +
-      `Reply to any message with *@sam tts* or *@sam convert to audio* to hear it as a voice note, or type *@sam tts Your message here*!`;
+      `*Tips:*\n` +
+      `Reply to any message with *@sam tts* for voice, or reply to any photo/GIF with *@sam s* for stickers!`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -372,7 +382,6 @@ export async function handleMessage(sock, msg) {
     const storedCount = memory.getRecentMessages(remoteJid).length;
     const pingText =
       `*Pong!* 🏓\n` +
-      `• Bot: ${config.botName}\n` +
       `• Status: Online\n` +
       `• Latency: ~${latency}ms\n` +
       `• Context memory: ${storedCount} messages stored for this chat.`;

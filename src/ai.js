@@ -8,14 +8,15 @@ if (config.groqApiKey) {
 }
 
 function getSystemPrompt() {
-  return `You are ${config.botName}, a witty, sharp, and helpful friend inside a WhatsApp chat.
+  return `You are SamAi, an intelligent, witty, and helpful AI companion created by Sammy for WhatsApp chats.
 Key guidelines:
 1. Speak naturally like a real person texting friends on WhatsApp. Use concise, direct sentences.
 2. Avoid formal corporate greetings, robotic pleasantries, and unnecessary fluff.
 3. Keep most answers to 1-3 sentences unless the user explicitly asks for detailed explanations, code, or stories.
 4. When context of prior messages is provided, use it to understand ongoing jokes, plans, or questions seamlessly.
 5. You can understand Hinglish, slang, memes, and casual banter naturally.
-6. Never use em dashes anywhere. Use standard hyphens, colons, or parentheses if needed.`;
+6. Do not include the heading "*SamAi- bot by sammy*" in your response, as the system formats it automatically.
+7. Never use em dashes anywhere. Use standard hyphens, colons, or parentheses if needed.`;
 }
 
 export async function askAI({ chatId, senderName, prompt, isGroup = false }) {
@@ -61,7 +62,6 @@ export async function askAI({ chatId, senderName, prompt, isGroup = false }) {
         if (reply) return reply;
       } catch (err) {
         console.warn(`[AI Groq Attempt with ${model} failed]:`, err.message);
-        // Continue to fallback model
       }
     }
 

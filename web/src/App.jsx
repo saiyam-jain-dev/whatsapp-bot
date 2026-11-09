@@ -169,7 +169,7 @@ export default function App() {
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <h1 style={{ fontSize: '18px', fontWeight: '700' }}>{config.botName}</h1>
+              <h1 style={{ fontSize: '18px', fontWeight: '700' }}>SamAi</h1>
               <span
                 style={{
                   fontSize: '11px',
@@ -180,7 +180,7 @@ export default function App() {
                   color: 'var(--text-muted)'
                 }}
               >
-                Prefix: {config.prefix}
+                bot by sammy
               </span>
             </div>
             <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
