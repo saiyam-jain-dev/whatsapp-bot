@@ -87,8 +87,11 @@ export function startApiServer(port = 3001) {
   // Serve Vite production build if present
   if (fs.existsSync(webDistPath)) {
     app.use(express.static(webDistPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(webDistPath, 'index.html'));
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api')) {
+        return res.sendFile(path.join(webDistPath, 'index.html'));
+      }
+      next();
     });
   }
 
