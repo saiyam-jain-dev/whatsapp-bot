@@ -31,34 +31,72 @@ function unwrapMessage(content) {
 }
 
 /**
- * Finds image media in either current message or quoted message.
+ * Extracts contextInfo from various WhatsApp message wrappers.
  */
-function findImageInMessage(msg) {
+function getContextInfo(root) {
+  if (!root) return null;
+  return root.extendedTextMessage?.contextInfo ||
+         root.imageMessage?.contextInfo ||
+         root.videoMessage?.contextInfo ||
+         root.documentMessage?.contextInfo ||
+         root.stickerMessage?.contextInfo ||
+         root.contextInfo ||
+         null;
+}
+
+/**
+ * Checks if the user text expresses intent to create or convert a sticker.
+ */
+function isStickerIntent(text) {
+  if (!text) return false;
+  const lower = text.toLowerCase().trim();
+  if (lower === 's' || lower === 'sticker' || lower === 'stickers') return true;
+  if (/^(create|make|convert|generate|turn into)(\s+(a|an|this|into))?\s+stickers?/i.test(lower)) return true;
+  if (/^stickers?(\s+(this|please|plz|now))?$/i.test(lower)) return true;
+  return false;
+}
+
+/**
+ * Finds image media in:
+ * 1. Current message attachment
+ * 2. Quoted message attachment
+ * 3. Recent chat media history
+ */
+function findImageInMessage(msg, remoteJid) {
   const root = unwrapMessage(msg.message);
 
   // 1. Direct message attachment
   if (root?.imageMessage) {
-    return { media: root.imageMessage, type: 'image' };
+    return { media: root.imageMessage, type: 'image', source: 'direct' };
   }
   if (root?.documentMessage && root.documentMessage.mimetype?.startsWith('image/')) {
-    return { media: root.documentMessage, type: 'document' };
+    return { media: root.documentMessage, type: 'document', source: 'direct' };
   }
   if (root?.stickerMessage) {
-    return { media: root.stickerMessage, type: 'sticker' };
+    return { media: root.stickerMessage, type: 'sticker', source: 'direct' };
   }
 
   // 2. Quoted message attachment
-  const quoted = root?.extendedTextMessage?.contextInfo?.quotedMessage;
+  const contextInfo = getContextInfo(root);
+  const quoted = contextInfo?.quotedMessage;
   if (quoted) {
     const unwrappedQuoted = unwrapMessage(quoted);
     if (unwrappedQuoted?.imageMessage) {
-      return { media: unwrappedQuoted.imageMessage, type: 'image' };
+      return { media: unwrappedQuoted.imageMessage, type: 'image', source: 'quoted' };
     }
     if (unwrappedQuoted?.documentMessage && unwrappedQuoted.documentMessage.mimetype?.startsWith('image/')) {
-      return { media: unwrappedQuoted.documentMessage, type: 'document' };
+      return { media: unwrappedQuoted.documentMessage, type: 'document', source: 'quoted' };
     }
     if (unwrappedQuoted?.stickerMessage) {
-      return { media: unwrappedQuoted.stickerMessage, type: 'sticker' };
+      return { media: unwrappedQuoted.stickerMessage, type: 'sticker', source: 'quoted' };
+    }
+  }
+
+  // 3. Fallback: Check recent media saved from this chat history
+  if (remoteJid) {
+    const recentMedia = memory.getLatestMedia(remoteJid);
+    if (recentMedia) {
+      return { ...recentMedia, source: 'chat_history' };
     }
   }
 
@@ -66,24 +104,24 @@ function findImageInMessage(msg) {
 }
 
 /**
- * Downloads image buffer from either the current message or a quoted message.
+ * Downloads image buffer from either the current message, quoted message, or chat history.
  */
-async function getImageBuffer(msg) {
-  const target = findImageInMessage(msg);
+async function getImageBuffer(msg, remoteJid) {
+  const target = findImageInMessage(msg, remoteJid);
   if (!target) {
-    console.log('[Sticker] No image found in current or quoted message');
+    console.log('[Sticker] No image found in direct message, quoted message, or recent chat history.');
     return null;
   }
 
   try {
-    console.log(`[Sticker] Found media type: ${target.type}. Starting download...`);
+    console.log(`[Sticker] Downloading media (source: ${target.source}, type: ${target.type})...`);
     const stream = await downloadContentFromMessage(target.media, target.type);
     const chunks = [];
     for await (const chunk of stream) {
       chunks.push(chunk);
     }
     const buffer = Buffer.concat(chunks);
-    console.log(`[Sticker] Download completed. Buffer size: ${buffer.length} bytes`);
+    console.log(`[Sticker] Download completed successfully. Size: ${buffer.length} bytes.`);
     return buffer;
   } catch (err) {
     console.error('[Sticker Download Error]:', err.message);
@@ -96,7 +134,8 @@ async function getImageBuffer(msg) {
  */
 async function getAudioBuffer(msg) {
   const root = unwrapMessage(msg.message);
-  const quoted = root?.extendedTextMessage?.contextInfo?.quotedMessage;
+  const contextInfo = getContextInfo(root);
+  const quoted = contextInfo?.quotedMessage;
   const unwrappedQuoted = unwrapMessage(quoted);
 
   const audioMsg = root?.audioMessage || unwrappedQuoted?.audioMessage;
@@ -164,8 +203,15 @@ export async function handleMessage(sock, msg) {
 
   const trimmedText = rawText.trim();
 
+  // If this message contains an image, save it to chat media memory
+  if (rootContent.imageMessage) {
+    memory.saveLatestMedia(remoteJid, { media: rootContent.imageMessage, type: 'image' });
+  } else if (rootContent.documentMessage && rootContent.documentMessage.mimetype?.startsWith('image/')) {
+    memory.saveLatestMedia(remoteJid, { media: rootContent.documentMessage, type: 'document' });
+  }
+
   // Check quoted context
-  const contextInfo = rootContent.extendedTextMessage?.contextInfo;
+  const contextInfo = getContextInfo(rootContent);
   const mentionedJids = contextInfo?.mentionedJid || [];
   const isMentioned = mentionedJids.includes(botJid) || (botJidRaw && mentionedJids.includes(botJidRaw));
   const isReplyToBot = contextInfo?.participant?.includes(botJid.split('@')[0]) || false;
@@ -230,7 +276,6 @@ export async function handleMessage(sock, msg) {
     commandBody = trimmedText.slice(defaultPrefix.length).trim();
   } else if (isMentioned || isReplyToBot) {
     isTriggered = true;
-    // Strip native mention if present
     commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
   } else if (!isGroup && !msg.key.fromMe) {
     // Direct message from someone else
@@ -249,13 +294,13 @@ export async function handleMessage(sock, msg) {
       `*🤖 ${config.botName} - WhatsApp AI Assistant*\n\n` +
       `*Commands (works with @sam or !):*\n` +
       `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
-      `• *@sam s* or *!s* - Turn photo into a sticker (as caption or reply)\n` +
+      `• *@sam s* or *!s* (or "@sam make sticker") - Turn photo into a sticker\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
-      `*Group Chat Behavior:*\n` +
-      `In groups, I only respond when you type *@sam*, use a *!* command, or reply directly to me. Otherwise I stay quiet and keep track of chat context!`;
+      `*Sticker Tips:*\n` +
+      `You can reply to any photo in chat with *@sam s* (or *@sam create sticker*), send a photo with caption *@sam s*, or simply type *@sam s* right after a photo was sent!`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -273,28 +318,35 @@ export async function handleMessage(sock, msg) {
     return replyWithTyping(sock, remoteJid, pingText, msg);
   }
 
-  // 3. Sticker command (@sam s, @sam sticker, !s, !sticker)
-  if (firstWord === 's' || firstWord === 'sticker') {
-    console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid})`);
-    const imgBuffer = await getImageBuffer(msg);
+  // 3. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
+  if (isStickerIntent(commandBody) || isStickerIntent(firstWord)) {
+    console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+    const imgBuffer = await getImageBuffer(msg, remoteJid);
     if (!imgBuffer) {
       return replyWithTyping(
         sock,
         remoteJid,
-        `Send an image with *@sam s* or *!s* as the caption, or reply to any photo with *@sam s* to make a sticker!`,
+        `No photo found to convert! You can:\n1. Reply to any photo in chat with *@sam s* (or *@sam create sticker*)\n2. Send a photo with caption *@sam s*\n3. Type *@sam s* right after a photo was shared in this chat.`,
         msg
       );
     }
 
     try {
-      console.log(`[Sticker] Converting image (${imgBuffer.length} bytes) to WebP sticker...`);
+      console.log(`[Sticker] Formatting image (${imgBuffer.length} bytes) to WebP sticker...`);
       const stickerBuffer = await createSticker(imgBuffer, {
         pack: `${config.botName} Pack`,
         author: senderName
       });
-      console.log(`[Sticker] Sticker created (${stickerBuffer.length} bytes). Sending to ${remoteJid}...`);
-      await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
-      console.log(`[Sticker] Successfully sent sticker!`);
+      console.log(`[Sticker] Sticker generated (${stickerBuffer.length} bytes). Sending to ${remoteJid}...`);
+
+      try {
+        await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
+      } catch (sendErr) {
+        console.warn('[Sticker] Quoted send failed, falling back to direct send:', sendErr.message);
+        await sock.sendMessage(remoteJid, { sticker: stickerBuffer });
+      }
+
+      console.log(`[Sticker] Sticker successfully delivered!`);
       return;
     } catch (err) {
       console.error('[Sticker Processing Error]:', err.message);
