@@ -744,9 +744,14 @@ export default function App() {
                 desc: 'Ask @sam anything directly, get ideas, recipes, code, jokes, or answers.'
               },
               {
+                cmd: `@sam tts <text> or !tts`,
+                title: 'Text to Voice Note (TTS)',
+                desc: 'Reply to any message with @sam tts or type @sam tts <text> to convert it into a real WhatsApp audio voice note.'
+              },
+              {
                 cmd: `@sam s or !s`,
-                title: 'Sticker Generator',
-                desc: 'Send an image with @sam s as caption, or reply to any photo with @sam s to turn it into a WhatsApp sticker.'
+                title: 'Sticker Generator (Photos & GIFs)',
+                desc: 'Send an image or GIF with caption @sam s, or reply to any photo/GIF to turn it into a WhatsApp sticker.'
               },
               {
                 cmd: `@sam summary or !summary`,

@@ -3,6 +3,7 @@ import { config } from './config.js';
 import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
 import { createSticker } from './sticker.js';
+import { textToVoiceNote } from './tts.js';
 
 /**
  * Unwraps nested WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, edited).
@@ -45,7 +46,7 @@ function getContextInfo(root) {
 }
 
 /**
- * Checks if the user text expresses intent to create or convert a sticker.
+ * Checks if user text expresses intent to create a sticker.
  */
 function isStickerIntent(text) {
   if (!text) return false;
@@ -53,6 +54,19 @@ function isStickerIntent(text) {
   if (lower === 's' || lower === 'sticker' || lower === 'stickers') return true;
   if (/^(create|make|convert|generate|turn into)(\s+(a|an|this|into))?\s+stickers?/i.test(lower)) return true;
   if (/stickers?(\s+(this|please|plz|now))?$/i.test(lower)) return true;
+  return false;
+}
+
+/**
+ * Checks if user text expresses intent to convert text to speech (TTS) audio.
+ */
+function isTtsIntent(text, firstWord) {
+  if (!text) return false;
+  const lower = text.toLowerCase().trim();
+  const word = (firstWord || '').toLowerCase();
+  if (['tts', 'say', 'voice', 'speak', 'audio'].includes(word)) return true;
+  if (/^(convert|turn)(\s+(this|the|a|into|to|message))+(\s+(into|to))?\s+(audio|voice|voice\s*note|speech)/i.test(lower)) return true;
+  if (/^(read|speak|say)\s+(this|it|out|message)/i.test(lower)) return true;
   return false;
 }
 
@@ -65,7 +79,7 @@ function isStickerIntent(text) {
 function findMediaForSticker(msg, remoteJid) {
   const root = unwrapMessage(msg.message);
 
-  // 1. Direct message attachment (image, video, GIF, document image, or sticker)
+  // 1. Direct message attachment
   if (root?.imageMessage) {
     return { media: root.imageMessage, type: 'image', source: 'direct' };
   }
@@ -98,7 +112,7 @@ function findMediaForSticker(msg, remoteJid) {
     }
   }
 
-  // 3. Fallback: Check recent media saved from this chat history
+  // 3. Fallback: Check recent media saved from chat history
   if (remoteJid) {
     const recentMedia = memory.getLatestMedia(remoteJid);
     if (recentMedia) {
@@ -110,7 +124,7 @@ function findMediaForSticker(msg, remoteJid) {
 }
 
 /**
- * Downloads media buffer from either the current message, quoted message, or chat history.
+ * Downloads media buffer from direct message, quoted message, or chat history.
  */
 async function getMediaBuffer(msg, remoteJid) {
   const target = findMediaForSticker(msg, remoteJid);
@@ -183,6 +197,44 @@ async function replyWithTyping(sock, jid, text, quotedMsg) {
 }
 
 /**
+ * Extracts target text for TTS conversion from command args, quoted message, or chat history.
+ */
+function extractTextForTts(msg, commandArgs, remoteJid) {
+  // If user passed explicit text after command (e.g. "@sam tts hello world")
+  // Strip out command prefix if needed
+  let cleanedArgs = (commandArgs || '').replace(/^(into|to)?\s*(audio|voice\s*note|voice|speech)[:\s]*/i, '').trim();
+  if (cleanedArgs.length > 0) {
+    return cleanedArgs;
+  }
+
+  // Check quoted message
+  const root = unwrapMessage(msg.message);
+  const contextInfo = getContextInfo(root);
+  const quoted = contextInfo?.quotedMessage;
+  if (quoted) {
+    const unwrappedQuoted = unwrapMessage(quoted);
+    const qText =
+      unwrappedQuoted?.conversation ||
+      unwrappedQuoted?.extendedTextMessage?.text ||
+      unwrappedQuoted?.imageMessage?.caption ||
+      unwrappedQuoted?.videoMessage?.caption ||
+      '';
+    if (qText.trim()) return qText.trim();
+  }
+
+  // Fallback to recent message in chat history
+  if (remoteJid) {
+    const recent = memory.getRecentMessages(remoteJid);
+    const lastMsg = recent.filter(m => !m.isBot && m.text).pop();
+    if (lastMsg?.text) {
+      return lastMsg.text;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Main dispatcher for incoming WhatsApp messages.
  */
 export async function handleMessage(sock, msg) {
@@ -239,7 +291,7 @@ export async function handleMessage(sock, msg) {
     });
   }
 
-  // Voice note handling
+  // Voice note transcription handling (speech to text)
   const isAudioMsg = Boolean(rootContent.audioMessage);
   if (isAudioMsg && (!isGroup || isMentioned || isReplyToBot)) {
     const audioData = await getAudioBuffer(msg);
@@ -267,7 +319,7 @@ export async function handleMessage(sock, msg) {
 
   // Determine trigger:
   // 1. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
-  // 2. Starts with "!" (e.g. "!ai", "!s", "!summary", "!ping")
+  // 2. Starts with "!" (e.g. "!ai", "!s", "!tts", "!ping")
   // 3. Bot is natively @mentioned or replied to in a group
   // 4. In direct 1-on-1 private chat (unless fromMe without a trigger command)
   const defaultPrefix = config.prefix || '!';
@@ -302,13 +354,14 @@ export async function handleMessage(sock, msg) {
       `*🤖 ${config.botName} - WhatsApp AI Assistant*\n\n` +
       `*Commands (works with @sam or !):*\n` +
       `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
-      `• *@sam s* or *!s* (or "@sam make sticker") - Turn photo, GIF, or short video into a sticker\n` +
+      `• *@sam tts <text>* or *!tts* (or "@sam convert to audio") - Convert text to voice note\n` +
+      `• *@sam s* or *!s* - Turn photo, GIF, or short video into a sticker\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
-      `*Sticker Tips:*\n` +
-      `Works on both photos and GIFs! Reply to any photo or GIF with *@sam s*, send one with caption *@sam s*, or type *@sam s* right after a media item was shared in chat.`;
+      `*Voice Note (TTS) Tips:*\n` +
+      `Reply to any message with *@sam tts* or *@sam convert to audio* to hear it as a voice note, or type *@sam tts Your message here*!`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -326,7 +379,50 @@ export async function handleMessage(sock, msg) {
     return replyWithTyping(sock, remoteJid, pingText, msg);
   }
 
-  // 3. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
+  // 3. TTS / Text to Audio Command (@sam tts, @sam voice, @sam say, @sam convert to audio)
+  if (isTtsIntent(commandBody, firstWord)) {
+    console.log(`[TTS Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+    const targetText = extractTextForTts(msg, commandArgs, remoteJid);
+
+    if (!targetText) {
+      return replyWithTyping(
+        sock,
+        remoteJid,
+        `No text found to convert to voice! You can:\n1. Reply to any text message with *@sam tts* (or *@sam convert to audio*)\n2. Type *@sam tts <your message here>*\n3. Type *@sam tts* right after a message was sent in this chat.`,
+        msg
+      );
+    }
+
+    try {
+      console.log(`[TTS] Synthesizing speech for: "${targetText.slice(0, 60)}..."`);
+      await sock.sendPresenceUpdate('recording', remoteJid);
+      const voiceBuffer = await textToVoiceNote(targetText);
+      console.log(`[TTS] Voice note generated (${voiceBuffer.length} bytes). Sending PTT audio to ${remoteJid}...`);
+
+      await sock.sendPresenceUpdate('paused', remoteJid);
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          { audio: voiceBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true },
+          { quoted: msg }
+        );
+      } catch (sendErr) {
+        console.warn('[TTS] Quoted voice send failed, falling back to direct send:', sendErr.message);
+        await sock.sendMessage(
+          remoteJid,
+          { audio: voiceBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true }
+        );
+      }
+
+      console.log('[TTS] Successfully delivered voice note!');
+      return;
+    } catch (err) {
+      console.error('[TTS Generation Error]:', err.message);
+      return replyWithTyping(sock, remoteJid, `Could not generate voice note: ${err.message}`, msg);
+    }
+  }
+
+  // 4. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
   if (isStickerIntent(commandBody) || isStickerIntent(firstWord)) {
     console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
     const mediaBuffer = await getMediaBuffer(msg, remoteJid);
@@ -362,20 +458,20 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 4. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 5. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 5. Clear command (@sam clear, !clear)
+  // 6. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 6. Conversational AI Prompt
+  // 7. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;

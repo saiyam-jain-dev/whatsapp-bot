@@ -29,6 +29,7 @@
     "cors": "^2.8.5",
     "dotenv": "^18.0.10",
     "express": "^5.2.1",
+    "google-tts-api": "^2.0.2",
     "groq-sdk": "^1.6.0",
     "pino": "^10.4.0",
     "qrcode-terminal": "^0.12.0",
