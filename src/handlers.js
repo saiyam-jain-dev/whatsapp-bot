@@ -270,28 +270,24 @@ export async function handleMessage(sock, msg) {
 
   const trimmedText = rawText.trim();
 
-  // If this message contains an image or video/GIF, save it to chat media memory
-  if (rootContent.imageMessage) {
-    memory.saveLatestMedia(remoteJid, { media: rootContent.imageMessage, type: 'image' });
-  } else if (rootContent.videoMessage) {
-    memory.saveLatestMedia(remoteJid, { media: rootContent.videoMessage, type: 'video' });
-  } else if (rootContent.documentMessage && (rootContent.documentMessage.mimetype?.startsWith('image/') || rootContent.documentMessage.mimetype?.startsWith('video/'))) {
-    memory.saveLatestMedia(remoteJid, { media: rootContent.documentMessage, type: 'document' });
+  // If this message contains an image or video/GIF in a group, save to media history
+  if (isGroup) {
+    if (rootContent.imageMessage) {
+      memory.saveLatestMedia(remoteJid, { media: rootContent.imageMessage, type: 'image' });
+    } else if (rootContent.videoMessage) {
+      memory.saveLatestMedia(remoteJid, { media: rootContent.videoMessage, type: 'video' });
+    } else if (rootContent.documentMessage && (rootContent.documentMessage.mimetype?.startsWith('image/') || rootContent.documentMessage.mimetype?.startsWith('video/'))) {
+      memory.saveLatestMedia(remoteJid, { media: rootContent.documentMessage, type: 'document' });
+    }
   }
 
   // Check quoted context
   const contextInfo = getContextInfo(rootContent);
   const mentionedJids = contextInfo?.mentionedJid || [];
   const isMentioned = mentionedJids.includes(botJid) || (botJidRaw && mentionedJids.includes(botJidRaw));
-  const isReplyToBot = contextInfo?.participant?.includes(botJid.split('@')[0]) || false;
 
-  // Debug logging
-  if (trimmedText || rootContent.imageMessage || rootContent.videoMessage) {
-    console.log(`[Msg] From: ${senderName} (${remoteJid}) | Text: "${trimmedText}" | Image: ${Boolean(rootContent.imageMessage)} | Video/GIF: ${Boolean(rootContent.videoMessage)} | fromMe: ${msg.key.fromMe}`);
-  }
-
-  // Record user messages into memory for context tracking
-  if (trimmedText && !msg.key.fromMe) {
+  // Record group messages into memory silently for context tracking
+  if (isGroup && trimmedText && !msg.key.fromMe) {
     memory.addMessage(remoteJid, {
       sender: senderName,
       senderJid,
@@ -300,38 +296,15 @@ export async function handleMessage(sock, msg) {
     });
   }
 
-  // Voice note transcription handling (speech to text)
-  const isAudioMsg = Boolean(rootContent.audioMessage);
-  if (isAudioMsg && (!isGroup || isMentioned || isReplyToBot)) {
-    const audioData = await getAudioBuffer(msg);
-    if (audioData) {
-      const transcription = await transcribeAudio(audioData.buffer, audioData.mimetype);
-      if (transcription) {
-        const aiAnswer = await askAI({
-          chatId: remoteJid,
-          senderName,
-          prompt: `[Friend sent a voice message that said: "${transcription}"]. Please respond to it.`,
-          isGroup
-        });
-
-        const replyText = `🎙️ *Transcribed:* "${transcription}"\n\n${aiAnswer}`;
-        memory.addMessage(remoteJid, {
-          sender: config.botName,
-          senderJid: botJid,
-          text: aiAnswer,
-          isBot: true
-        });
-        return replyWithTyping(sock, remoteJid, replyText, msg);
-      }
-    }
-  }
-
-  // Determine trigger:
-  // 1. Starts with @explaintts (replies directly in voice audio)
-  // 2. Starts with @sam (e.g. "@sam", "@sam:", "@Sam")
-  // 3. Starts with "!" (e.g. "!ai", "!s", "!tts", "!ping")
-  // 4. Bot is natively @mentioned or replied to in a group
-  // 5. In direct 1-on-1 private chat
+  // STRICT TRIGGER POLICY:
+  // The bot MUST ONLY respond if an explicit command is invoked:
+  // 1. Starts with @explaintts
+  // 2. Starts with @sam (or @Sam)
+  // 3. Starts with command prefix "!"
+  // 4. In a group chat, if explicitly @mentioned via WhatsApp blue tag
+  //
+  // NORMAL DIRECT MESSAGES, BUSINESS TALK, INCOMING CLIENT INQUIRIES, OR REGULAR BANTER
+  // WILL NEVER TRIGGER THE BOT UNDER ANY CIRCUMSTANCES.
   const defaultPrefix = config.prefix || '!';
   const samPrefixRegex = /^@sam[:\s]*/i;
   const explainTtsRegex = /^@explaintts[:\s]*/i;
@@ -350,16 +323,16 @@ export async function handleMessage(sock, msg) {
   } else if (trimmedText.startsWith(defaultPrefix)) {
     isTriggered = true;
     commandBody = trimmedText.slice(defaultPrefix.length).trim();
-  } else if (isMentioned || isReplyToBot) {
+  } else if (isGroup && isMentioned) {
     isTriggered = true;
     commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
-  } else if (!isGroup && !msg.key.fromMe) {
-    // Direct message from someone else
-    isTriggered = true;
-    commandBody = trimmedText;
   }
 
+  // If not explicitly commanded, SILENTLY EXIT immediately
   if (!isTriggered) return;
+
+  // Log only commanded executions
+  console.log(`[Command Invoked] From: ${senderName} (${remoteJid}) | Trigger: "${commandBody}"`);
 
   const firstWord = commandBody.split(/\s+/)[0]?.toLowerCase();
   const commandArgs = commandBody.slice(firstWord.length).trim();
@@ -456,8 +429,8 @@ export async function handleMessage(sock, msg) {
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
-      `*Tips:*\n` +
-      `Type *@explaintts <your question>* to have SamAi explain anything directly in a WhatsApp voice note!`;
+      `*Strict Command Policy:*\n` +
+      `SamAi strictly stays silent and never replies to messages unless explicitly called with *@sam*, *@explaintts*, or *!*.`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -574,7 +547,7 @@ export async function handleMessage(sock, msg) {
     promptText = commandBody;
   }
 
-  if (!promptText && (isMentioned || isReplyToBot)) {
+  if (!promptText && isMentioned) {
     promptText = 'Hey! What can I help you with?';
   }
 
