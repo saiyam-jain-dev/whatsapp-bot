@@ -10,6 +10,10 @@ dnsResolver.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 const undiciAgent = new Agent({
   connect: {
     lookup: (hostname, options, callback) => {
+      if (typeof options === 'function') {
+        callback = options;
+        options = {};
+      }
       if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
         return dns.lookup(hostname, options, callback);
       }
