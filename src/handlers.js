@@ -71,6 +71,21 @@ function isTtsIntent(text, firstWord) {
 }
 
 /**
+ * Checks if user text expresses intent to fetch a profile picture.
+ */
+function isPfpIntent(text, firstWord) {
+  if (!text) return false;
+  const lower = text.toLowerCase().trim();
+  const word = (firstWord || '').toLowerCase();
+  if (['pfp', 'dp', 'avatar', 'profilepic', 'profilephoto'].includes(word)) return true;
+  if (word === 'profile' && /^(pic|picture|photo)/i.test(lower.slice(word.length).trim())) return true;
+  if (/^(pfp|dp|avatar|profile\s*pic(ture)?|profile\s*photo)\b/i.test(lower)) return true;
+  if (/^(get|show|send|fetch|give|grab)\s+(the\s+)?(pfp|dp|avatar|profile\s*pic(ture)?|profile\s*photo)\b/i.test(lower)) return true;
+  if (/(pfp|dp|avatar|profile\s*pic(ture)?|profile\s*photo)$/i.test(lower)) return true;
+  return false;
+}
+
+/**
  * Finds image or GIF/video media in:
  * 1. Current message attachment
  * 2. Quoted message attachment
@@ -182,7 +197,7 @@ async function getAudioBuffer(msg) {
  * Formats every outgoing text response with the custom brand heading:
  * *SamAi- bot by sammy*
  */
-async function replyWithTyping(sock, jid, text, quotedMsg) {
+async function replyWithTyping(sock, jid, text, quotedMsg, options = {}) {
   try {
     await sock.sendPresenceUpdate('composing', jid);
 
@@ -201,7 +216,7 @@ async function replyWithTyping(sock, jid, text, quotedMsg) {
       formattedText = `${heading}\n${divider}\n${formattedText}`;
     }
 
-    return await sock.sendMessage(jid, { text: formattedText }, { quoted: quotedMsg });
+    return await sock.sendMessage(jid, { text: formattedText, ...options }, { quoted: quotedMsg });
   } catch (err) {
     console.error('[Send Message Error]:', err.message);
   }
@@ -425,6 +440,7 @@ export async function handleMessage(sock, msg) {
       `• *@explaintts <prompt>* - Ask any question and get an audio voice note answer\n` +
       `• *@sam tts <text>* or *!tts* - Convert text to voice note\n` +
       `• *@sam s* or *!s* - Turn photo, GIF, or video into sticker\n` +
+      `• *@sam pfp [@user|reply]* or *!pfp* - Fetch profile picture of group member\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
@@ -526,20 +542,202 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 6. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 6. Profile Picture (PFP / DP / Avatar) command
+  if (isPfpIntent(commandBody, firstWord)) {
+    console.log(`[PFP Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+
+    const lowerArgs = commandArgs.toLowerCase().trim();
+    if (lowerArgs === 'help') {
+      const pfpHelpText =
+        `*Profile Picture (PFP) Commands:*\n` +
+        `• Reply to any group member's message with *@sam pfp* (or *!pfp*)\n` +
+        `• *@sam pfp @user* - Fetch profile picture of tagged member\n` +
+        `• *@sam pfp <phone-number>* - Fetch profile picture by phone number\n` +
+        `• *@sam pfp group* - Fetch group profile picture\n` +
+        `• *@sam pfp* - Fetch your own profile picture\n\n` +
+        `Aliases: *pfp*, *dp*, *avatar*, *profilepic*`;
+      return replyWithTyping(sock, remoteJid, pfpHelpText, msg);
+    }
+
+    // Determine target JID
+    let targetJid = null;
+    let targetName = null;
+
+    // A. Check if another user was @mentioned (excluding the bot itself)
+    const otherMentions = mentionedJids.filter(jid => {
+      const normalized = jid.split('@')[0];
+      return jid !== botJid && jid !== botJidRaw && normalized !== botJid.split('@')[0];
+    });
+
+    if (otherMentions.length > 0) {
+      targetJid = otherMentions[0];
+    }
+
+    // B. Check if quoting a message
+    if (!targetJid) {
+      const quoted = contextInfo?.quotedMessage;
+      if (quoted) {
+        targetJid = contextInfo?.participant || (isGroup ? null : remoteJid);
+      }
+    }
+
+    // C. Check if targeting the group icon
+    if (!targetJid && /\b(group|this group|group icon|group pfp|group dp)\b/i.test(commandBody)) {
+      if (isGroup) {
+        targetJid = remoteJid;
+      }
+    }
+
+    // D. Check if phone number was passed as argument (e.g. !pfp 919876543210)
+    if (!targetJid) {
+      const digitsOnly = commandArgs.replace(/\D/g, '');
+      if (digitsOnly.length >= 7 && digitsOnly.length <= 15) {
+        targetJid = `${digitsOnly}@s.whatsapp.net`;
+      }
+    }
+
+    // E. Fallback: target sender themselves
+    if (!targetJid) {
+      targetJid = senderJid;
+    }
+
+    // If target is an LID, try to map to phone JID if available
+    if (targetJid && targetJid.endsWith('@lid') && sock.signalRepository?.lidMapping?.getPNForLID) {
+      try {
+        const pn = await sock.signalRepository.lidMapping.getPNForLID(targetJid);
+        if (pn) {
+          targetJid = pn;
+        }
+      } catch {
+        // Keep LID if resolving fails
+      }
+    }
+
+    // Resolve target display name
+    if (targetJid === remoteJid) {
+      targetName = 'Group';
+    } else if (targetJid === senderJid) {
+      targetName = senderName;
+    } else {
+      const recent = memory.getRecentMessages(remoteJid);
+      const match = recent.slice().reverse().find(m => m.senderJid === targetJid);
+      if (match?.sender) {
+        targetName = match.sender;
+      }
+    }
+
+    try {
+      await sock.sendPresenceUpdate('composing', remoteJid);
+
+      // Attempt to retrieve profile picture URL (high-res image first, preview fallback)
+      let pfpUrl = null;
+      try {
+        pfpUrl = await sock.profilePictureUrl(targetJid, 'image');
+      } catch {
+        try {
+          pfpUrl = await sock.profilePictureUrl(targetJid, 'preview');
+        } catch {
+          pfpUrl = null;
+        }
+      }
+
+      if (!pfpUrl) {
+        const isSelf = targetJid === senderJid;
+        const isGroupTarget = targetJid === remoteJid;
+        const targetDisplay = isGroupTarget
+          ? 'this group'
+          : isSelf
+            ? 'your account'
+            : targetName
+              ? `${targetName} (@${targetJid.split('@')[0]})`
+              : `@${targetJid.split('@')[0]}`;
+
+        const notFoundMsg =
+          `Could not retrieve profile picture for ${targetDisplay}.\n\n` +
+          `Possible reasons:\n` +
+          `• No profile picture is set\n` +
+          `• WhatsApp privacy settings hide the photo\n` +
+          `• Account is not accessible`;
+
+        return replyWithTyping(sock, remoteJid, notFoundMsg, msg, { mentions: [targetJid] });
+      }
+
+      console.log(`[PFP] Fetching profile picture image from URL for ${targetJid}...`);
+      const response = await fetch(pfpUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to download image (HTTP ${response.status})`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const imageBuffer = Buffer.from(arrayBuffer);
+
+      const heading = '*SamAi- bot by sammy*';
+      const divider = '────────────────────';
+      const isSelf = targetJid === senderJid;
+      const isGroupTarget = targetJid === remoteJid;
+
+      let captionTitle = '';
+      if (isGroupTarget) {
+        captionTitle = 'Group Profile Picture';
+      } else if (isSelf) {
+        captionTitle = `Profile Picture of @${targetJid.split('@')[0]} (You)`;
+      } else if (targetName && targetName !== targetJid.split('@')[0]) {
+        captionTitle = `Profile Picture of ${targetName} (@${targetJid.split('@')[0]})`;
+      } else {
+        captionTitle = `Profile Picture of @${targetJid.split('@')[0]}`;
+      }
+
+      let tipNote = '';
+      if (isSelf && isGroup) {
+        tipNote = `\n\n💡 _Tip: Tag a member (@sam pfp @user) or reply to their message with @sam pfp to fetch their photo._`;
+      }
+
+      const caption = `${heading}\n${divider}\n👤 *${captionTitle}*${tipNote}`;
+
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          {
+            image: imageBuffer,
+            caption,
+            mentions: [targetJid]
+          },
+          { quoted: msg }
+        );
+      } catch (sendErr) {
+        console.warn('[PFP] Quoted image send failed, falling back to direct send:', sendErr.message);
+        await sock.sendMessage(
+          remoteJid,
+          {
+            image: imageBuffer,
+            caption,
+            mentions: [targetJid]
+          }
+        );
+      }
+
+      console.log(`[PFP] Successfully sent profile picture for ${targetJid}`);
+      return;
+    } catch (err) {
+      console.error('[PFP Error]:', err.message);
+      return replyWithTyping(sock, remoteJid, `Could not retrieve profile picture: ${err.message}`, msg);
+    }
+  }
+
+  // 7. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 7. Clear command (@sam clear, !clear)
+  // 8. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 8. Conversational AI Prompt
+  // 9. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;
