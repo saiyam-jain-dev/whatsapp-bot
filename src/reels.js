@@ -30,62 +30,146 @@ function withTimeout(promise, ms, desc = 'Operation') {
   ]);
 }
 
+function detectMediaType(url, itemType) {
+  if (itemType === 'video') return 'video';
+  if (itemType === 'image' || itemType === 'photo') return 'image';
+  if (/\.(mp4|mov|webm|m4v)(\?|$)/i.test(url)) return 'video';
+  if (/\.(jpg|jpeg|png|webp)(\?|$)/i.test(url)) return 'image';
+  return 'video';
+}
+
+function getCdnHeaders(url) {
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'sec-ch-ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"Windows"'
+  };
+
+  if (url.includes('snapcdn.app') || url.includes('indown.net')) {
+    headers['Referer'] = 'https://indown.net/';
+  } else if (url.includes('rapidcdn.app') || url.includes('snapsave.app')) {
+    headers['Referer'] = 'https://snapsave.app/';
+  } else if (url.includes('cdninstagram.com') || url.includes('fbcdn.net') || url.includes('instagram.com')) {
+    headers['Referer'] = 'https://www.instagram.com/';
+  } else {
+    headers['Referer'] = 'https://www.instagram.com/';
+  }
+
+  return headers;
+}
+
 /**
- * Extracts downloadable video/image URL from an Instagram Reel or post with multi-tier fallback.
+ * Extracts downloadable video/image candidates from an Instagram Reel or post with multi-tier fallback.
  */
 export async function extractInstagramMedia(reelUrl) {
-  let videoUrl = null;
-  let mediaTitle = '';
-  let mediaType = 'video';
-
-  // Canonicalize URL to https://www.instagram.com/reel/<CODE>/ or clean URL
   const match = reelUrl.match(INSTAGRAM_REEL_REGEX);
   const targetUrl = match?.[1]
     ? `https://www.instagram.com/reel/${match[1]}/`
     : reelUrl.replace(/[)\].,;!]+$/, '').split('?')[0];
 
-  // Tier 1: scrapr indown scraper (ultra fast, ~1-2s)
+  const candidates = [];
+  let mediaTitle = '';
+
+  // Tier 1: snapsave-media-downloader (fastest, 8s timeout)
   try {
-    const res = await withTimeout(scrapr.instagram.indown(targetUrl), 4500, 'indown');
-    if (res.status && res.result?.downloads?.length) {
-      const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
-      if (item?.url) {
-        videoUrl = item.url;
-        mediaType = item.type || 'video';
-        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+    const res = await withTimeout(snapsave(targetUrl), 8000, 'snapsave-pkg');
+    if (res.success && res.data?.media?.length) {
+      if (res.data.description) mediaTitle = res.data.description.slice(0, 100);
+      for (const item of res.data.media) {
+        if (item?.url) {
+          candidates.push({
+            url: item.url,
+            mediaType: detectMediaType(item.url, item.type),
+            mediaTitle: mediaTitle || 'Instagram Reel'
+          });
+        }
       }
     }
   } catch (err) {
-    console.warn('[IG Reel] indown attempt failed:', err.message);
+    console.warn('[IG Reel] snapsave-pkg attempt failed:', err.message);
   }
 
-  // Tier 2: snapsave-media-downloader (fast secondary fallback, 5s timeout)
-  if (!videoUrl) {
+  // Tier 2: scrapr indown scraper (ultra reliable, 8s timeout)
+  if (candidates.length === 0) {
     try {
-      const res = await withTimeout(snapsave(targetUrl), 5000, 'snapsave');
-      if (res.success && res.data?.media?.length) {
-        const item = res.data.media.find(m => m.type === 'video') || res.data.media[0];
-        if (item?.url) {
-          videoUrl = item.url;
-          mediaType = item.type || 'video';
-          if (res.data.description) mediaTitle = res.data.description.slice(0, 100);
+      const res = await withTimeout(scrapr.instagram.indown(targetUrl), 8000, 'indown');
+      if (res.status && res.result?.downloads?.length) {
+        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+        for (const item of res.result.downloads) {
+          if (item?.url) {
+            candidates.push({
+              url: item.url,
+              mediaType: detectMediaType(item.url, item.type),
+              mediaTitle: mediaTitle || 'Instagram Reel'
+            });
+          }
         }
       }
     } catch (err) {
-      console.warn('[IG Reel] snapsave attempt failed:', err.message);
+      console.warn('[IG Reel] indown attempt failed:', err.message);
     }
   }
 
-  // Tier 3: scrapr direct embed scraper
-  if (!videoUrl) {
+  // Tier 3: scrapr snapsave scraper (8s timeout)
+  if (candidates.length === 0) {
     try {
-      const res = await withTimeout(scrapr.instagram.direct(targetUrl), 4000, 'direct');
+      const res = await withTimeout(scrapr.instagram.snapsave(targetUrl), 8000, 'scrapr snapsave');
       if (res.status && res.result?.downloads?.length) {
-        const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
-        if (item?.url) {
-          videoUrl = item.url;
-          mediaType = item.type || 'video';
-          if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+        for (const item of res.result.downloads) {
+          if (item?.url) {
+            candidates.push({
+              url: item.url,
+              mediaType: detectMediaType(item.url, item.type),
+              mediaTitle: mediaTitle || 'Instagram Reel'
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[IG Reel] scrapr snapsave attempt failed:', err.message);
+    }
+  }
+
+  // Tier 4: scrapr snapinsta scraper (8s timeout)
+  if (candidates.length === 0) {
+    try {
+      const res = await withTimeout(scrapr.instagram.snapinsta(targetUrl), 8000, 'snapinsta');
+      if (res.status && res.result?.downloads?.length) {
+        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+        for (const item of res.result.downloads) {
+          if (item?.url) {
+            candidates.push({
+              url: item.url,
+              mediaType: detectMediaType(item.url, item.type),
+              mediaTitle: mediaTitle || 'Instagram Reel'
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[IG Reel] snapinsta attempt failed:', err.message);
+    }
+  }
+
+  // Tier 5: scrapr direct embed scraper (6s timeout)
+  if (candidates.length === 0) {
+    try {
+      const res = await withTimeout(scrapr.instagram.direct(targetUrl), 6000, 'direct');
+      if (res.status && res.result?.downloads?.length) {
+        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+        for (const item of res.result.downloads) {
+          if (item?.url) {
+            candidates.push({
+              url: item.url,
+              mediaType: detectMediaType(item.url, item.type),
+              mediaTitle: mediaTitle || 'Instagram Reel'
+            });
+          }
         }
       }
     } catch (err) {
@@ -93,28 +177,17 @@ export async function extractInstagramMedia(reelUrl) {
     }
   }
 
-  // Tier 4: scrapr snapsave scraper
-  if (!videoUrl) {
-    try {
-      const res = await withTimeout(scrapr.instagram.snapsave(targetUrl), 4500, 'scrapr snapsave');
-      if (res.status && res.result?.downloads?.length) {
-        const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
-        if (item?.url) {
-          videoUrl = item.url;
-          mediaType = item.type || 'video';
-          if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
-        }
-      }
-    } catch (err) {
-      console.warn('[IG Reel] snapsave scraper attempt failed:', err.message);
-    }
-  }
+  if (candidates.length === 0) return null;
 
-  if (!videoUrl) return null;
+  // Prioritize video candidates before images
+  const videos = candidates.filter(c => c.mediaType === 'video');
+  const images = candidates.filter(c => c.mediaType === 'image');
+  const orderedCandidates = [...videos, ...images];
 
   return {
-    videoUrl,
-    mediaType,
+    candidates: orderedCandidates,
+    videoUrl: orderedCandidates[0]?.url,
+    mediaType: orderedCandidates[0]?.mediaType,
     mediaTitle: mediaTitle && mediaTitle !== 'Instagram Media' ? mediaTitle : 'Instagram Reel'
   };
 }
@@ -123,7 +196,6 @@ export async function extractInstagramMedia(reelUrl) {
  * Automatically downloads and delivers an Instagram Reel video or photo directly to the chat.
  */
 export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl) {
-  // Sanitize trailing punctuation from URL and get clean canonical URL
   const match = reelUrl.match(INSTAGRAM_REEL_REGEX);
   const cleanUrl = match?.[1]
     ? `https://www.instagram.com/reel/${match[1]}/`
@@ -147,7 +219,7 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
 
   try {
     const extracted = await extractInstagramMedia(cleanUrl);
-    if (!extracted?.videoUrl) {
+    if (!extracted?.candidates?.length) {
       console.warn(`[IG Reel] Could not extract media for: ${cleanUrl}`);
       try {
         await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
@@ -155,22 +227,43 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
       return;
     }
 
-    console.log(`[IG Reel] Downloading media buffer from CDN...`);
-    const response = await fetch(extracted.videoUrl, {
-      signal: AbortSignal.timeout(20000),
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      }
-    });
+    console.log(`[IG Reel] Found ${extracted.candidates.length} download candidate(s). Downloading media buffer from CDN...`);
 
-    if (!response.ok) {
-      throw new Error(`Failed to download media buffer (HTTP ${response.status})`);
+    let mediaBuffer = null;
+    let chosenCandidate = null;
+
+    for (let i = 0; i < extracted.candidates.length; i++) {
+      const candidate = extracted.candidates[i];
+      try {
+        console.log(`[IG Reel] Candidate ${i + 1}/${extracted.candidates.length}: ${candidate.url.slice(0, 60)}...`);
+        const headers = getCdnHeaders(candidate.url);
+        const response = await fetch(candidate.url, {
+          signal: AbortSignal.timeout(25000),
+          headers
+        });
+
+        if (!response.ok) {
+          console.warn(`[IG Reel] Candidate ${i + 1} returned HTTP ${response.status}, trying next...`);
+          continue;
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buf = Buffer.from(arrayBuffer);
+        if (buf && buf.length > 500) {
+          mediaBuffer = buf;
+          chosenCandidate = candidate;
+          break;
+        }
+      } catch (candErr) {
+        console.warn(`[IG Reel] Candidate ${i + 1} failed: ${candErr.message}, trying next...`);
+      }
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    const mediaBuffer = Buffer.from(arrayBuffer);
-    console.log(`[IG Reel] Media download complete (${mediaBuffer.length} bytes). Sending to ${remoteJid}...`);
+    if (!mediaBuffer || !chosenCandidate) {
+      throw new Error('All candidate download streams failed or were forbidden');
+    }
+
+    console.log(`[IG Reel] Media download complete (${mediaBuffer.length} bytes, type: ${chosenCandidate.mediaType}). Sending to ${remoteJid}...`);
 
     const heading = '*SamAi- bot by sammy*';
     const divider = '────────────────────';
@@ -180,7 +273,7 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
         : '';
     const caption = `${heading}\n${divider}\n🎬 *Instagram Reel*${titleText}`;
 
-    if (extracted.mediaType === 'image') {
+    if (chosenCandidate.mediaType === 'image') {
       try {
         await sock.sendMessage(
           remoteJid,
