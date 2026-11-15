@@ -1,10 +1,23 @@
 import { downloadContentFromMessage } from '@whiskeysockets/baileys';
+import axios from 'axios';
 import { config } from './config.js';
 import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
 import { createSticker } from './sticker.js';
 import { textToVoiceNote } from './tts.js';
 import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
+
+/**
+ * Normalizes user JIDs by removing multi-device session tags (e.g. 1234:0@s.whatsapp.net -> 1234@s.whatsapp.net).
+ */
+function normalizeJid(jid) {
+  if (!jid) return '';
+  if (jid.endsWith('@g.us')) return jid;
+  const parts = jid.split('@');
+  const user = parts[0].split(':')[0];
+  const server = parts[1] || 's.whatsapp.net';
+  return `${user}@${server}`;
+}
 
 /**
  * Unwraps nested WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, edited).
@@ -269,7 +282,8 @@ export async function handleMessage(sock, msg) {
   const isGroup = remoteJid.endsWith('@g.us');
   const botJidRaw = sock.user?.id || '';
   const botJid = botJidRaw.split(':')[0] + '@s.whatsapp.net';
-  const senderJid = isGroup ? (msg.key.participant || msg.participant || '') : remoteJid;
+  const senderJidRaw = isGroup ? (msg.key.participant || msg.participant || '') : remoteJid;
+  const senderJid = normalizeJid(senderJidRaw);
   const senderName = msg.pushName || 'Friend';
 
   const rootContent = unwrapMessage(msg.message);
@@ -625,6 +639,8 @@ export async function handleMessage(sock, msg) {
       }
     }
 
+    targetJid = normalizeJid(targetJid);
+
     // Resolve target display name
     if (targetJid === remoteJid) {
       targetName = 'Group';
@@ -675,13 +691,32 @@ export async function handleMessage(sock, msg) {
       }
 
       console.log(`[PFP] Fetching profile picture image from URL for ${targetJid}...`);
-      const response = await fetch(pfpUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to download image (HTTP ${response.status})`);
+      let imageBuffer = null;
+      try {
+        const res = await axios.get(pfpUrl, {
+          responseType: 'arraybuffer',
+          timeout: 10000,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/*,*/*'
+          }
+        });
+        imageBuffer = Buffer.from(res.data);
+      } catch (axErr) {
+        console.warn('[PFP] Axios image fetch failed, trying fetch fallback:', axErr.message);
+        const response = await fetch(pfpUrl, {
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to download image (HTTP ${response.status})`);
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        imageBuffer = Buffer.from(arrayBuffer);
       }
-
-      const arrayBuffer = await response.arrayBuffer();
-      const imageBuffer = Buffer.from(arrayBuffer);
 
       const heading = '*SamAi- bot by sammy*';
       const divider = '────────────────────';
