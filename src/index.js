@@ -105,7 +105,7 @@ async function startBot() {
   if (botState.sock) {
     try {
       botState.sock.ev?.removeAllListeners();
-      botState.sock.ws?.close();
+      botState.sock.end?.();
     } catch {}
     botState.sock = null;
   }
@@ -133,7 +133,7 @@ async function startBot() {
     logger,
     printQRInTerminal: false,
     auth: state,
-    browser: Browsers.macOS('Chrome'),
+    browser: Browsers.windows('Desktop'),
     syncFullHistory: false,
     generateHighQualityLinkPreview: true
   });
@@ -163,20 +163,21 @@ async function startBot() {
 
       const isLoggedOut = statusCode === DisconnectReason.loggedOut;
       const isReplaced = statusCode === DisconnectReason.connectionReplaced;
-      const shouldReconnect = !isLoggedOut;
+      const shouldReconnect = !isLoggedOut && !isReplaced;
 
       console.log(`[!] Connection closed. Reason code: ${statusCode} (${isReplaced ? 'connectionReplaced' : 'normal'}). Reconnecting: ${shouldReconnect}`);
 
       if (shouldReconnect) {
-        const delayMs = isReplaced ? 6000 : 3000;
         if (!reconnectTimeout) {
-          console.log(`[*] Scheduling reconnect in ${delayMs / 1000} seconds...\n`);
+          console.log('[*] Scheduling reconnect in 3 seconds...\n');
           reconnectTimeout = setTimeout(() => {
             reconnectTimeout = null;
             isStarting = false;
             startBot();
-          }, delayMs);
+          }, 3000);
         }
+      } else if (isReplaced) {
+        console.warn('[!] Session was opened on another client or device. Pausing bot to prevent session collision.');
       } else {
         console.log('[X] Device was logged out. To pair again, delete the auth_session directory and restart.');
       }
