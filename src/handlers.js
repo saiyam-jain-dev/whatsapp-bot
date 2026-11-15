@@ -119,6 +119,81 @@ function normalizeJid(jid) {
   return `${user}@${server}`;
 }
 
+let cachedLogsGroupJid = null;
+let lastLogsGroupLookup = 0;
+
+/**
+ * Resolves the "logs" WhatsApp group JID where command telemetry should be posted.
+ */
+export async function getLogsGroupJid(sock) {
+  if (!sock) return null;
+  if (cachedLogsGroupJid && Date.now() - lastLogsGroupLookup < 120000) {
+    return cachedLogsGroupJid;
+  }
+
+  try {
+    const participatingGroups = await sock.groupFetchAllParticipating();
+    for (const [jid, group] of Object.entries(participatingGroups)) {
+      const subject = (group.subject || '').replace(/['"“”]/g, '').trim().toLowerCase();
+      if (subject === 'logs') {
+        cachedLogsGroupJid = jid;
+        lastLogsGroupLookup = Date.now();
+        console.log(`[LogsGroup] Found target logs group: "${group.subject}" (${jid})`);
+        return jid;
+      }
+    }
+  } catch (err) {
+    console.warn(`[LogsGroup] Could not fetch participating groups: ${err.message}`);
+  }
+
+  return cachedLogsGroupJid;
+}
+
+/**
+ * Forwards structured execution log of any invoked command to the dedicated "logs" WhatsApp group.
+ */
+export async function forwardCommandLog(sock, {
+  senderName,
+  remoteJid,
+  chatName,
+  command,
+  action,
+  status = 'Success',
+  error = null
+}) {
+  try {
+    const logsJid = await getLogsGroupJid(sock);
+    if (!logsJid) return;
+
+    const timeStr = new Date().toLocaleTimeString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+    const isError = Boolean(error || status.toLowerCase().includes('fail') || status.toLowerCase().includes('err'));
+    const statusIcon = isError ? '❌' : '✅';
+    const headerTitle = isError ? '⚠️ *[Command Failed]*' : '🤖 *[Command Executed]*';
+
+    let logMessage = `${headerTitle}\n` +
+      `────────────────────\n` +
+      `👤 *User:* ${senderName || 'User'}\n` +
+      `💬 *Chat:* ${chatName || (remoteJid?.endsWith('@g.us') ? 'Group Chat' : 'Direct Message')}\n` +
+      `⚡ *Trigger:* \`${command || 'N/A'}\`\n` +
+      `🎯 *Action:* ${action || 'Command Processed'}\n` +
+      `📊 *Status:* ${statusIcon} ${status}\n` +
+      `🕒 *Time:* ${timeStr}`;
+
+    if (error) {
+      logMessage += `\n❗ *Error Details:* ${error}`;
+    }
+
+    await sock.sendMessage(logsJid, { text: logMessage });
+  } catch (err) {
+    console.warn(`[LogsGroup] Failed to forward log to "logs" group: ${err.message}`);
+  }
+}
+
 /**
  * Safely downloads media stream from Baileys message with automatic retries and fallback type.
  */
@@ -743,8 +818,18 @@ export async function handleMessage(sock, msg) {
   // If not explicitly commanded with @sam or !, SILENTLY EXIT immediately
   if (!isTriggered) return;
 
+  let chatName = 'Direct Message';
+  if (isGroup) {
+    try {
+      const meta = await sock.groupMetadata(remoteJid);
+      chatName = meta?.subject || 'Group Chat';
+    } catch {
+      chatName = 'Group Chat';
+    }
+  }
+
   // Log only commanded executions
-  console.log(`[Command Invoked] From: ${senderName} (${remoteJid}) | Trigger: "${commandBody}"`);
+  console.log(`[Command Invoked] From: ${senderName} (${remoteJid}) in "${chatName}" | Trigger: "${commandBody}"`);
 
   const firstWord = commandBody.split(/\s+/)[0]?.toLowerCase();
   const commandArgs = commandBody.slice(firstWord.length).trim();
@@ -822,9 +907,17 @@ export async function handleMessage(sock, msg) {
 
       await replyWithTyping(sock, remoteJid, `🎙️ *Voice Explanation:*\n\n${aiAnswer}`, msg);
       console.log('[ExplainTTS] Successfully sent audio voice note and text explanation!');
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: `explaintts ${commandBody}`, action: 'Voice Explanation', status: 'Success'
+      });
       return;
     } catch (err) {
       console.error('[ExplainTTS Error]:', err.message);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: `explaintts ${commandBody}`, action: 'Voice Explanation', status: 'Failed', error: err.message
+      });
       return replyWithTyping(sock, remoteJid, `Could not generate voice explanation: ${err.message}`, msg);
     }
   }
@@ -847,6 +940,10 @@ export async function handleMessage(sock, msg) {
       `• *!help* or *@sam help* - Show this command list\n\n` +
       `*Trigger Policy:*\n` +
       `SamAi strictly stays silent and never replies to any message in DMs or groups unless explicitly invoked with *!* or *@sam*.`;
+    forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: commandBody, action: 'Show Help Menu', status: 'Success'
+    });
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -860,6 +957,10 @@ export async function handleMessage(sock, msg) {
       `• Status: Online\n` +
       `• Latency: ~${latency}ms\n` +
       `• Context memory: ${storedCount} messages stored for this chat.`;
+    forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: commandBody, action: 'Ping Check', status: 'Success'
+    });
     return replyWithTyping(sock, remoteJid, pingText, msg);
   }
 
@@ -899,9 +1000,17 @@ export async function handleMessage(sock, msg) {
       }
 
       console.log('[TTS] Successfully delivered voice note!');
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Text to Voice Note', status: 'Success'
+      });
       return;
     } catch (err) {
       console.error('[TTS Generation Error]:', err.message);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Text to Voice Note', status: 'Failed', error: err.message
+      });
       return replyWithTyping(sock, remoteJid, `Could not generate voice note: ${err.message}`, msg);
     }
   }
@@ -960,6 +1069,10 @@ export async function handleMessage(sock, msg) {
             { video: videoBuffer, gifPlayback: true, caption }
           );
         }
+        await forwardCommandLog(sock, {
+          senderName, remoteJid, chatName,
+          command: commandBody, action: 'Converted Sticker to GIF', status: 'Success'
+        });
         return;
       }
 
@@ -979,6 +1092,10 @@ export async function handleMessage(sock, msg) {
             { video: videoBuffer, mimetype: 'video/mp4', caption }
           );
         }
+        await forwardCommandLog(sock, {
+          senderName, remoteJid, chatName,
+          command: commandBody, action: 'Converted Sticker to Video', status: 'Success'
+        });
         return;
       }
 
@@ -997,11 +1114,19 @@ export async function handleMessage(sock, msg) {
           { image: photoBuffer, caption }
         );
       }
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Converted Sticker to Photo', status: 'Success'
+      });
       return;
     } catch (err) {
       const detailedError = err?.cause ? `${err.message} (${err.cause.code || err.cause.message || err.cause})` : err.message;
       console.error('[Sticker to Media Error]:', detailedError, err.stack);
       logDebug('[Sticker to Media Error]', { message: err.message, cause: err.cause, stack: err.stack });
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Convert Sticker to Media', status: 'Failed', error: detailedError
+      });
       return replyWithTyping(sock, remoteJid, `Could not convert sticker: ${detailedError}`, msg);
     }
   }
@@ -1074,10 +1199,18 @@ export async function handleMessage(sock, msg) {
     }
 
     if (successCount === 0) {
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Create Sticker', status: 'Failed', error: 'No media converted'
+      });
       return replyWithTyping(sock, remoteJid, `Could not generate sticker from the selected media.`, msg);
     }
 
     console.log(`[Sticker] Successfully delivered ${successCount}/${count} sticker(s)!`);
+    await forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: commandBody, action: `Created ${successCount} Sticker(s)`, status: 'Success'
+    });
     return;
   }
 
@@ -1290,9 +1423,17 @@ export async function handleMessage(sock, msg) {
       }
 
       console.log(`[PFP] Successfully sent profile picture for ${targetJid}`);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: `Fetched Profile Picture (${targetName || targetJid})`, status: 'Success'
+      });
       return;
     } catch (err) {
       console.error('[PFP Error]:', err.message);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Fetch Profile Picture', status: 'Failed', error: err.message
+      });
       return replyWithTyping(sock, remoteJid, `Could not retrieve profile picture: ${err.message}`, msg);
     }
   }
@@ -1325,6 +1466,10 @@ export async function handleMessage(sock, msg) {
     if (match) {
       const reelUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
       await downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Downloaded Instagram Reel', status: 'Success'
+      });
       return;
     }
 
@@ -1357,6 +1502,10 @@ export async function handleMessage(sock, msg) {
     if (match) {
       const ytUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
       await downloadAndSendYouTubeMedia(sock, msg, remoteJid, ytUrl);
+      await forwardCommandLog(sock, {
+        senderName, remoteJid, chatName,
+        command: commandBody, action: 'Downloaded YouTube Video', status: 'Success'
+      });
       return;
     }
 
@@ -1372,12 +1521,20 @@ export async function handleMessage(sock, msg) {
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
+    await forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: commandBody, action: 'Summarized Chat Messages', status: 'Success'
+    });
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
   // 11. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
+    await forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: commandBody, action: 'Cleared Chat Memory', status: 'Success'
+    });
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
@@ -1406,6 +1563,11 @@ export async function handleMessage(sock, msg) {
       senderJid: botJid,
       text: aiAnswer,
       isBot: true
+    });
+
+    await forwardCommandLog(sock, {
+      senderName, remoteJid, chatName,
+      command: promptText, action: 'AI Chat Query', status: 'Success'
     });
 
     return replyWithTyping(sock, remoteJid, aiAnswer, msg);

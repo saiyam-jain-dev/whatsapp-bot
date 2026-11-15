@@ -47,6 +47,18 @@ export function startApiServer(port = 3001) {
     });
   });
 
+  // List all participating groups
+  app.get('/api/groups', async (req, res) => {
+    try {
+      if (!botState.sock) return res.status(503).json({ error: 'Socket not connected' });
+      const groups = await botState.sock.groupFetchAllParticipating();
+      const list = Object.values(groups).map(g => ({ id: g.id, subject: g.subject, owner: g.owner }));
+      res.json({ groups: list });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Group memory and chat context
   app.get('/api/memory', (req, res) => {
     const chats = [];
