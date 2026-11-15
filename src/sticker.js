@@ -195,19 +195,61 @@ export async function stickerToPhoto(webpBuffer) {
 }
 
 /**
- * Converts an animated WebP sticker buffer into an MP4 video buffer.
+ * Converts a static or animated WebP sticker buffer into an MP4 video buffer.
+ * Decodes via Sharp (using libwebp 1.6) into GIF/PNG frames first to bypass
+ * legacy FFmpeg WebP demuxer limitations on Windows.
  */
 export async function stickerToVideo(webpBuffer) {
   const tmpDir = os.tmpdir();
-  const inputPath = path.join(tmpDir, `stk_in_${Date.now()}_${Math.random().toString(36).slice(2)}.webp`);
-  const outputPath = path.join(tmpDir, `video_out_${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`);
+  const id = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  const gifPath = path.join(tmpDir, `stk_anim_${id}.gif`);
+  const pngPath = path.join(tmpDir, `stk_static_${id}.png`);
+  const outputPath = path.join(tmpDir, `video_out_${id}.mp4`);
+
+  let inputPath = null;
+  let isAnimated = false;
 
   try {
-    await fs.writeFile(inputPath, webpBuffer);
+    try {
+      // 1. Inspect metadata to detect animated WebP
+      const metadata = await sharp(webpBuffer, { animated: true }).metadata();
+      const pages = metadata.pages || 1;
+
+      if (pages > 1) {
+        isAnimated = true;
+        const gifBuf = await sharp(webpBuffer, { animated: true }).gif().toBuffer();
+        await fs.writeFile(gifPath, gifBuf);
+        inputPath = gifPath;
+      }
+    } catch (sharpAnimErr) {
+      console.warn('[stickerToVideo] Sharp animated probe warning:', sharpAnimErr.message);
+    }
+
+    // 2. Fallback to static PNG frame if not animated or if animated probe failed
+    if (!inputPath) {
+      try {
+        const pngBuf = await sharp(webpBuffer, { page: 0 }).png().toBuffer();
+        await fs.writeFile(pngPath, pngBuf);
+        inputPath = pngPath;
+      } catch (staticErr) {
+        console.warn('[stickerToVideo] Sharp static fallback warning:', staticErr.message);
+        const rawPath = path.join(tmpDir, `stk_raw_${id}.webp`);
+        await fs.writeFile(rawPath, webpBuffer);
+        inputPath = rawPath;
+      }
+    }
+
+    // 3. Render MP4 with FFmpeg
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('FFmpeg video conversion timed out after 20s')), 20000);
-      ffmpeg(inputPath)
-        .inputOptions(['-nostdin', '-y'])
+      const timeout = setTimeout(() => reject(new Error('FFmpeg video conversion timed out after 25s')), 25000);
+      const cmd = ffmpeg(inputPath).inputOptions(['-nostdin', '-y']);
+
+      if (!isAnimated) {
+        // Loop static frame for 3 seconds
+        cmd.inputOptions(['-loop', '1', '-t', '3']);
+      }
+
+      cmd
         .outputOptions([
           '-c:v libx264',
           '-preset ultrafast',
@@ -229,7 +271,11 @@ export async function stickerToVideo(webpBuffer) {
 
     return await fs.readFile(outputPath);
   } finally {
-    await fs.unlink(inputPath).catch(() => {});
+    await fs.unlink(gifPath).catch(() => {});
+    await fs.unlink(pngPath).catch(() => {});
+    if (inputPath && inputPath.includes('stk_raw_')) {
+      await fs.unlink(inputPath).catch(() => {});
+    }
     await fs.unlink(outputPath).catch(() => {});
   }
 }

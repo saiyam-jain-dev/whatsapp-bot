@@ -147,12 +147,12 @@ function isStickerToPhotoIntent(text, firstWord) {
   if (!text) return false;
   const lower = text.toLowerCase().trim();
   const word = (firstWord || '').toLowerCase();
-  if (['photo', 'image', 'toimg', 'tophoto', 'tovideo'].includes(word)) return true;
-  if (/^(photo|image|toimg|tophoto|tovideo)\b/i.test(lower)) return true;
-  if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
-  if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
-  if (/^(convert|turn|extract)(\s+(this|the|a|it))?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
-  if (/^(to|into)\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
+  if (['photo', 'image', 'video', 'toimg', 'tophoto', 'tovideo'].includes(word)) return true;
+  if (/^(photo|image|video|toimg|tophoto|tovideo)\b/i.test(lower)) return true;
+  if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+stickers?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
+  if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
+  if (/^(convert|turn|extract)(\s+(this|the|a|it))?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
+  if (/^(to|into)\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
   return false;
 }
 
@@ -728,7 +728,7 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 5. Convert Sticker to Photo/Video command (!photo, @sam photo, !image, !toimg, !tovideo)
+  // 5. Convert Sticker to Photo/Video command (!photo, @sam photo, !image, !toimg, !tovideo, @sam video)
   if (isStickerToPhotoIntent(commandBody, firstWord)) {
     console.log(`[Sticker to Photo/Video] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
     const target = findStickerMedia(msg, remoteJid);
@@ -737,20 +737,36 @@ export async function handleMessage(sock, msg) {
       return replyWithTyping(
         sock,
         remoteJid,
-        `No sticker found to convert! You can:\n1. Reply to any sticker with *!photo* (or *@sam photo*)\n2. Send a sticker directly with caption *!photo*\n3. Type *!photo* right after a sticker was shared in this chat.`,
+        `No sticker found to convert! You can:\n1. Reply directly to any sticker with *!photo* or *!video* (or *@sam photo* / *@sam video*)\n2. Send a sticker directly with caption *!photo* or *!video*`,
         msg
       );
     }
 
     try {
       await sock.sendPresenceUpdate('composing', remoteJid);
-      const stickerBuffer = await downloadMediaBuffer(target.media, 'sticker');
+
+      let stickerBuffer;
+      try {
+        stickerBuffer = await downloadMediaBuffer(target.media, 'sticker');
+      } catch (dlErr) {
+        if (target.source === 'chat_history') {
+          return replyWithTyping(
+            sock,
+            remoteJid,
+            `The sticker from chat history has expired on WhatsApp servers. Please reply directly to the sticker with *@sam photo* or *@sam video*!`,
+            msg
+          );
+        }
+        throw dlErr;
+      }
+
+      const wantsVideo = /\b(video|tovideo|mp4|anim)\b/i.test(commandBody) || firstWord === 'video' || firstWord === 'tovideo';
       const isAnimated = target.isAnimated || isAnimatedWebp(stickerBuffer);
       const heading = '*SamAi- bot by sammy*';
       const divider = '────────────────────';
 
-      if (isAnimated) {
-        console.log('[Sticker to Media] Converting animated sticker to MP4 video with FFmpeg...');
+      if (wantsVideo || isAnimated) {
+        console.log('[Sticker to Media] Converting sticker to MP4 video...');
         const videoBuffer = await stickerToVideo(stickerBuffer);
         const caption = `${heading}\n${divider}\n🎥 *Converted Sticker to Video*`;
         try {
@@ -766,7 +782,7 @@ export async function handleMessage(sock, msg) {
           );
         }
       } else {
-        console.log('[Sticker to Media] Converting static sticker to PNG photo with FFmpeg...');
+        console.log('[Sticker to Media] Converting sticker to PNG photo...');
         const photoBuffer = await stickerToPhoto(stickerBuffer);
         const caption = `${heading}\n${divider}\n🖼️ *Converted Sticker to Photo*`;
         try {

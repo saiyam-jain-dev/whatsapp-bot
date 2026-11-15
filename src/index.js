@@ -4,6 +4,14 @@ try {
   dns.setServers(['1.1.1.1', '1.0.0.1']);
 } catch {}
 
+process.on('uncaughtException', (err) => {
+  console.error('[Process Uncaught Exception]:', err?.message || err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[Process Unhandled Rejection]:', reason?.message || reason);
+});
+
 import { Agent, setGlobalDispatcher } from 'undici';
 setGlobalDispatcher(
   new Agent({
