@@ -3,7 +3,7 @@ import axios from 'axios';
 import { config } from './config.js';
 import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
-import { createSticker } from './sticker.js';
+import { createSticker, stickerToPhoto, stickerToVideo, isAnimatedWebp } from './sticker.js';
 import { textToVoiceNote } from './tts.js';
 import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
 
@@ -97,6 +97,70 @@ function isPfpIntent(text, firstWord) {
   if (/^(get|show|send|fetch|give|grab)\s+(the\s+)?(pfp|dp|avatar|profile\s*pic(ture)?|profile\s*photo)\b/i.test(lower)) return true;
   if (/(pfp|dp|avatar|profile\s*pic(ture)?|profile\s*photo)$/i.test(lower)) return true;
   return false;
+}
+
+/**
+ * Checks if user text expresses intent to convert sticker to photo or video.
+ */
+function isStickerToPhotoIntent(text, firstWord) {
+  if (!text) return false;
+  const lower = text.toLowerCase().trim();
+  const word = (firstWord || '').toLowerCase();
+  if (['photo', 'image', 'toimg', 'tophoto', 'tovideo'].includes(word)) return true;
+  if (/^(photo|image|toimg|tophoto|tovideo)\b/i.test(lower)) return true;
+  if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
+  if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
+  return false;
+}
+
+/**
+ * Finds sticker media in:
+ * 1. Quoted message (most common: replying to a sticker)
+ * 2. Current message attachment
+ * 3. Recent chat media history (if a sticker was recently sent)
+ */
+function findStickerMedia(msg, remoteJid) {
+  const root = unwrapMessage(msg.message);
+  const contextInfo = getContextInfo(root);
+  const quoted = contextInfo?.quotedMessage;
+
+  // 1. Quoted message
+  if (quoted) {
+    const unwrappedQuoted = unwrapMessage(quoted);
+    if (unwrappedQuoted?.stickerMessage) {
+      return {
+        media: unwrappedQuoted.stickerMessage,
+        type: 'sticker',
+        isAnimated: Boolean(unwrappedQuoted.stickerMessage.isAnimated),
+        source: 'quoted'
+      };
+    }
+  }
+
+  // 2. Direct message
+  if (root?.stickerMessage) {
+    return {
+      media: root.stickerMessage,
+      type: 'sticker',
+      isAnimated: Boolean(root.stickerMessage.isAnimated),
+      source: 'direct'
+    };
+  }
+
+  // 3. Fallback: Recent chat media if it was a sticker
+  if (remoteJid) {
+    const recentMedia = memory.getLatestMedia(remoteJid);
+    if (recentMedia && recentMedia.type === 'sticker') {
+      return {
+        media: recentMedia.media,
+        type: 'sticker',
+        isAnimated: Boolean(recentMedia.media?.isAnimated),
+        source: 'chat_history'
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -300,7 +364,7 @@ export async function handleMessage(sock, msg) {
 
   const trimmedText = rawText.trim();
 
-  // If this message contains an image or video/GIF in a group, save to media history
+  // If this message contains an image, video/GIF, or sticker in a group, save to media history
   if (isGroup) {
     if (rootContent.imageMessage) {
       memory.saveLatestMedia(remoteJid, { media: rootContent.imageMessage, type: 'image' });
@@ -308,6 +372,8 @@ export async function handleMessage(sock, msg) {
       memory.saveLatestMedia(remoteJid, { media: rootContent.videoMessage, type: 'video' });
     } else if (rootContent.documentMessage && (rootContent.documentMessage.mimetype?.startsWith('image/') || rootContent.documentMessage.mimetype?.startsWith('video/'))) {
       memory.saveLatestMedia(remoteJid, { media: rootContent.documentMessage, type: 'document' });
+    } else if (rootContent.stickerMessage) {
+      memory.saveLatestMedia(remoteJid, { media: rootContent.stickerMessage, type: 'sticker' });
     }
   }
 
@@ -457,22 +523,23 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 2. Help command (@sam help, @sam menu, !help, !menu)
+  // 2. Help command (!help, @sam help, !menu, @sam menu)
   if (firstWord === 'help' || firstWord === 'menu') {
     const helpText =
-      `*Commands (works with @sam or !):*\n` +
-      `• *@sam <prompt>* or *!ai <prompt>* - Ask a question or chat\n` +
-      `• *@explaintts <prompt>* - Ask any question and get an audio voice note answer\n` +
-      `• *@sam tts <text>* or *!tts* - Convert text to voice note\n` +
-      `• *@sam s* or *!s* - Turn photo, GIF, or video into sticker\n` +
-      `• *@sam pfp [@user|reply]* or *!pfp* - Fetch profile picture of group member\n` +
-      `• *Instagram Reel Links* - Send any Instagram Reel link and SamAi downloads it automatically (no command needed!)\n` +
-      `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
-      `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
-      `• *@sam clear* or *!clear* - Clear recent chat context\n` +
-      `• *@sam help* or *!help* - Show this menu\n\n` +
+      `*Commands (works with ! or @sam):*\n\n` +
+      `• *!ai <prompt>* or *@sam <prompt>* - Ask any question or chat with AI\n` +
+      `• *@explaintts <prompt>* - Ask a question and get a spoken audio voice note answer\n` +
+      `• *!tts <text>* or *@sam tts <text>* - Convert text or quoted message to voice note\n` +
+      `• *!s* or *@sam s* - Reply to any photo, GIF, or video to create a sticker\n` +
+      `• *!photo* or *@sam photo* - Reply to any sticker to convert it to a photo or video\n` +
+      `• *!pfp* or *@sam pfp* - Get profile picture of yourself, tagged member, or replied user\n` +
+      `• *Instagram Reels* - Send any Instagram Reel link directly and it auto-downloads (no command needed!)\n` +
+      `• *!summary* or *@sam summary* - Summarize recent group chat messages\n` +
+      `• *!ping* or *@sam ping* - Check bot connection status and latency\n` +
+      `• *!clear* or *@sam clear* - Clear rolling chat context memory\n` +
+      `• *!help* or *@sam help* - Show this command list\n\n` +
       `*Trigger Policy:*\n` +
-      `SamAi stays silent and never replies to messages unless an Instagram Reel link is shared, or explicitly called with *@sam*, *@explaintts*, or *!*.`;
+      `SamAi stays silent and never replies to normal group banter unless an Instagram Reel link is shared, or explicitly invoked with *!* or *@sam*.`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -532,7 +599,73 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 5. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
+  // 5. Convert Sticker to Photo/Video command (!photo, @sam photo, !image, !toimg, !tovideo)
+  if (isStickerToPhotoIntent(commandBody, firstWord)) {
+    console.log(`[Sticker to Photo/Video] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+    const target = findStickerMedia(msg, remoteJid);
+
+    if (!target) {
+      return replyWithTyping(
+        sock,
+        remoteJid,
+        `No sticker found to convert! You can:\n1. Reply to any sticker with *!photo* (or *@sam photo*)\n2. Send a sticker directly with caption *!photo*\n3. Type *!photo* right after a sticker was shared in this chat.`,
+        msg
+      );
+    }
+
+    try {
+      await sock.sendPresenceUpdate('composing', remoteJid);
+      const stream = await downloadContentFromMessage(target.media, 'sticker');
+      const chunks = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+      const stickerBuffer = Buffer.concat(chunks);
+      const isAnimated = target.isAnimated || isAnimatedWebp(stickerBuffer);
+      const heading = '*SamAi- bot by sammy*';
+      const divider = '────────────────────';
+
+      if (isAnimated) {
+        console.log('[Sticker to Media] Converting animated sticker to MP4 video with FFmpeg...');
+        const videoBuffer = await stickerToVideo(stickerBuffer);
+        const caption = `${heading}\n${divider}\n🎥 *Converted Sticker to Video*`;
+        try {
+          await sock.sendMessage(
+            remoteJid,
+            { video: videoBuffer, mimetype: 'video/mp4', caption },
+            { quoted: msg }
+          );
+        } catch {
+          await sock.sendMessage(
+            remoteJid,
+            { video: videoBuffer, mimetype: 'video/mp4', caption }
+          );
+        }
+      } else {
+        console.log('[Sticker to Media] Converting static sticker to PNG photo with FFmpeg...');
+        const photoBuffer = await stickerToPhoto(stickerBuffer);
+        const caption = `${heading}\n${divider}\n🖼️ *Converted Sticker to Photo*`;
+        try {
+          await sock.sendMessage(
+            remoteJid,
+            { image: photoBuffer, caption },
+            { quoted: msg }
+          );
+        } catch {
+          await sock.sendMessage(
+            remoteJid,
+            { image: photoBuffer, caption }
+          );
+        }
+      }
+      return;
+    } catch (err) {
+      console.error('[Sticker to Media Error]:', err.message);
+      return replyWithTyping(sock, remoteJid, `Could not convert sticker: ${err.message}`, msg);
+    }
+  }
+
+  // 6. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
   if (isStickerIntent(commandBody) || isStickerIntent(firstWord)) {
     console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
     const mediaBuffer = await getMediaBuffer(msg, remoteJid);
@@ -568,7 +701,7 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 6. Profile Picture (PFP / DP / Avatar) command
+  // 7. Profile Picture (PFP / DP / Avatar) command
   if (isPfpIntent(commandBody, firstWord)) {
     console.log(`[PFP Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
 
@@ -771,7 +904,7 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 7. Instagram Reel Command (@sam reel, !reel, @sam ig, !ig, @sam download)
+  // 8. Instagram Reel Command (@sam reel, !reel, @sam ig, !ig, @sam download)
   if (['reel', 'reels', 'ig', 'igdl', 'download'].includes(firstWord)) {
     let targetUrl = commandArgs;
     if (!targetUrl) {
@@ -804,20 +937,20 @@ export async function handleMessage(sock, msg) {
     );
   }
 
-  // 8. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 9. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 9. Clear command (@sam clear, !clear)
+  // 10. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 10. Conversational AI Prompt
+  // 11. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;
