@@ -111,6 +111,8 @@ function isStickerToPhotoIntent(text, firstWord) {
   if (/^(photo|image|toimg|tophoto|tovideo)\b/i.test(lower)) return true;
   if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
   if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
+  if (/^(convert|turn|extract)(\s+(this|the|a|it))?\s+(in)?to\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
+  if (/^(to|into)\s+(photo|image|pic|picture|video)/i.test(lower)) return true;
   return false;
 }
 
@@ -148,14 +150,14 @@ function findStickerMedia(msg, remoteJid) {
     };
   }
 
-  // 3. Fallback: Recent chat media if it was a sticker
+  // 3. Fallback: Search memory for the most recent sticker in this chat
   if (remoteJid) {
-    const recentMedia = memory.getLatestMedia(remoteJid);
-    if (recentMedia && recentMedia.type === 'sticker') {
+    const recentSticker = memory.getLatestMediaOfType(remoteJid, 'sticker');
+    if (recentSticker) {
       return {
-        media: recentMedia.media,
+        media: recentSticker.media,
         type: 'sticker',
-        isAnimated: Boolean(recentMedia.media?.isAnimated),
+        isAnimated: Boolean(recentSticker.media?.isAnimated || recentSticker.isAnimated),
         source: 'chat_history'
       };
     }
@@ -498,8 +500,8 @@ export async function handleMessage(sock, msg) {
   // NORMAL DIRECT MESSAGES, BUSINESS TALK, INCOMING CLIENT INQUIRIES, OR REGULAR BANTER
   // WILL NEVER TRIGGER THE BOT UNDER ANY CIRCUMSTANCES.
   const defaultPrefix = config.prefix || '!';
-  const samPrefixRegex = /^@sam[:\s]*/i;
-  const explainTtsRegex = /^@explaintts[:\s]*/i;
+  const samPrefixRegex = /^@\s*sam\b[:\s]*/i;
+  const explainTtsRegex = /^@\s*explaintts\b[:\s]*/i;
 
   let isTriggered = false;
   let isExplainTts = false;
@@ -517,7 +519,7 @@ export async function handleMessage(sock, msg) {
     commandBody = trimmedText.slice(defaultPrefix.length).trim();
   } else if (isGroup && isMentioned) {
     isTriggered = true;
-    commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').trim();
+    commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').replace(samPrefixRegex, '').trim();
   }
 
   // If not explicitly commanded, SILENTLY EXIT immediately

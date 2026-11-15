@@ -76,6 +76,21 @@ class MemoryManager {
     return item;
   }
 
+  getLatestMediaOfType(chatId, type) {
+    if (!chatId) return null;
+    const list = this.chatMediaList.get(chatId) || [];
+    const now = Date.now();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const item = list[i];
+      if ((now - item.timestamp) <= 30 * 60 * 1000) {
+        if (!type || item.type === type) return item;
+      }
+    }
+    const single = this.getLatestMedia(chatId);
+    if (single && (!type || single.type === type)) return single;
+    return null;
+  }
+
   /**
    * Retrieves an album or batch of media items belonging to one message or sent together.
    * If albumId is present, matches all items in the album.

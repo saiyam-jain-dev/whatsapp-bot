@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import waStickerPkg, { Sticker, StickerTypes } from 'wa-sticker-formatter';
 import { fileTypeFromBuffer } from 'file-type';
+import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 
@@ -155,29 +156,41 @@ export async function createSticker(mediaBuffer, { pack = '@sam Pack', author = 
 }
 
 /**
- * Converts a static or animated WebP sticker buffer into a PNG photo buffer.
+ * Converts a static or animated WebP sticker buffer into a PNG photo buffer using Sharp.
  */
 export async function stickerToPhoto(webpBuffer) {
-  const tmpDir = os.tmpdir();
-  const inputPath = path.join(tmpDir, `stk_in_${Date.now()}_${Math.random().toString(36).slice(2)}.webp`);
-  const outputPath = path.join(tmpDir, `photo_out_${Date.now()}_${Math.random().toString(36).slice(2)}.png`);
-
   try {
-    await fs.writeFile(inputPath, webpBuffer);
-    await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .inputOptions(['-nostdin'])
-        .outputOptions(['-vframes 1'])
-        .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
+    return await sharp(webpBuffer, { page: 0 }).png().toBuffer();
+  } catch (sharpErr) {
+    console.warn('[Sticker to Photo] Sharp conversion failed, falling back to FFmpeg:', sharpErr.message);
+    const tmpDir = os.tmpdir();
+    const inputPath = path.join(tmpDir, `stk_in_${Date.now()}_${Math.random().toString(36).slice(2)}.webp`);
+    const outputPath = path.join(tmpDir, `photo_out_${Date.now()}_${Math.random().toString(36).slice(2)}.png`);
 
-    return await fs.readFile(outputPath);
-  } finally {
-    await fs.unlink(inputPath).catch(() => {});
-    await fs.unlink(outputPath).catch(() => {});
+    try {
+      await fs.writeFile(inputPath, webpBuffer);
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('FFmpeg conversion timed out after 10s')), 10000);
+        ffmpeg(inputPath)
+          .inputOptions(['-nostdin', '-y'])
+          .outputOptions(['-vframes', '1'])
+          .output(outputPath)
+          .on('end', () => {
+            clearTimeout(timeout);
+            resolve();
+          })
+          .on('error', (err) => {
+            clearTimeout(timeout);
+            reject(err);
+          })
+          .run();
+      });
+
+      return await fs.readFile(outputPath);
+    } finally {
+      await fs.unlink(inputPath).catch(() => {});
+      await fs.unlink(outputPath).catch(() => {});
+    }
   }
 }
 
@@ -192,8 +205,9 @@ export async function stickerToVideo(webpBuffer) {
   try {
     await fs.writeFile(inputPath, webpBuffer);
     await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('FFmpeg video conversion timed out after 20s')), 20000);
       ffmpeg(inputPath)
-        .inputOptions(['-nostdin'])
+        .inputOptions(['-nostdin', '-y'])
         .outputOptions([
           '-c:v libx264',
           '-pix_fmt yuv420p',
@@ -201,8 +215,14 @@ export async function stickerToVideo(webpBuffer) {
           '-movflags +faststart'
         ])
         .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
+        .on('end', () => {
+          clearTimeout(timeout);
+          resolve();
+        })
+        .on('error', (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        })
         .run();
     });
 
