@@ -428,14 +428,15 @@ async function getAudioBuffer(msg) {
  */
 async function replyWithTyping(sock, jid, text, quotedMsg, options = {}) {
   try {
-    await sock.sendPresenceUpdate('composing', jid);
+    const minDelay = config.typingDelayMin ?? 0;
+    const maxDelay = config.typingDelayMax ?? 150;
+    const delay = maxDelay > minDelay ? Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay : minDelay;
 
-    const minDelay = config.typingDelayMin || 1000;
-    const maxDelay = config.typingDelayMax || 2500;
-    const delay = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-    await new Promise(resolve => setTimeout(resolve, delay));
-
-    await sock.sendPresenceUpdate('paused', jid);
+    if (delay > 0) {
+      await sock.sendPresenceUpdate('composing', jid);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      await sock.sendPresenceUpdate('paused', jid);
+    }
 
     const heading = '*SamAi- bot by sammy*';
     const divider = '────────────────────';

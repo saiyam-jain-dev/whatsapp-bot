@@ -1,7 +1,7 @@
 import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
 try {
-  dns.setServers(['8.8.8.8', '1.1.1.1']);
+  dns.setServers(['1.1.1.1', '1.0.0.1']);
 } catch {}
 
 import { Agent, setGlobalDispatcher } from 'undici';
@@ -9,8 +9,10 @@ setGlobalDispatcher(
   new Agent({
     connect: {
       family: 4,
-      timeout: 30000
-    }
+      timeout: 15000
+    },
+    keepAliveTimeout: 120000,
+    keepAliveMaxTimeout: 600000
   })
 );
 
@@ -28,6 +30,7 @@ import { Boom } from '@hapi/boom';
 import { config } from './config.js';
 import { handleMessage, preRecordMedia } from './handlers.js';
 import { botState, startApiServer } from './server.js';
+import { warmUpAI } from './ai.js';
 
 const logger = pino({ level: 'silent' });
 let apiServerStarted = false;
@@ -108,6 +111,9 @@ async function startBot() {
       console.log('💬 Ready to receive direct messages and group commands.');
       console.log('🌐 Web Dashboard: http://localhost:3001');
       console.log('====================================================\n');
+
+      // Pre-warm Groq API connection in background to eliminate first-message latency
+      warmUpAI().catch(() => {});
     }
   });
 

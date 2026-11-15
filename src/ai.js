@@ -48,17 +48,24 @@ export async function askAI({ chatId, senderName, prompt, isGroup = false }) {
 
     for (const model of uniqueModels) {
       try {
-        const response = await groqClient.chat.completions.create({
+        const createPromise = groqClient.chat.completions.create({
           model,
           messages: [
             { role: 'system', content: getSystemPrompt() },
             { role: 'user', content: userContent }
           ],
+          reasoning_format: 'hidden',
           temperature: 0.7,
-          max_tokens: 800
+          max_tokens: 350
         });
 
-        const reply = response.choices[0]?.message?.content?.trim();
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`${model} response timed out after 6s`)), 6000)
+        );
+
+        const response = await Promise.race([createPromise, timeoutPromise]);
+        const choice = response.choices?.[0]?.message;
+        const reply = choice?.content?.trim() || choice?.reasoning?.trim();
         if (reply) return reply;
       } catch (err) {
         console.warn(`[AI Groq Attempt with ${model} failed]:`, err.message);
@@ -144,5 +151,22 @@ export async function transcribeAudio(audioBuffer, mimeType = 'audio/ogg') {
   } catch (err) {
     console.error('[Whisper Error]:', err.message);
     return null;
+  }
+}
+
+/**
+ * Pre-warms Groq API connection pool at startup to eliminate cold-start latency.
+ */
+export async function warmUpAI() {
+  if (!config.groqApiKey) return;
+  try {
+    if (!groqClient) {
+      groqClient = new Groq({ apiKey: config.groqApiKey });
+    }
+    console.log('[AI] Warming up Groq API connection pool...');
+    await groqClient.models.list();
+    console.log('[AI] Groq connection pool is warm and ready!');
+  } catch (err) {
+    console.warn('[AI Warmup Warning]:', err.message);
   }
 }

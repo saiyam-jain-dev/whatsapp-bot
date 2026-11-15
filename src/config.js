@@ -15,8 +15,8 @@ export const config = {
   groqModel: process.env.GROQ_MODEL || 'openai/gpt-oss-120b',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
   contextLimit: parseInt(process.env.CONTEXT_LIMIT || '15', 10),
-  typingDelayMin: parseInt(process.env.TYPING_DELAY_MIN || '1000', 10),
-  typingDelayMax: parseInt(process.env.TYPING_DELAY_MAX || '2500', 10),
+  typingDelayMin: parseInt(process.env.TYPING_DELAY_MIN || '0', 10),
+  typingDelayMax: parseInt(process.env.TYPING_DELAY_MAX || '150', 10),
   authDir: path.join(rootDir, 'auth_session'),
   rootDir
 };
