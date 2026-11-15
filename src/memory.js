@@ -3,7 +3,8 @@ import { config } from './config.js';
 class MemoryManager {
   constructor() {
     this.chats = new Map();
-    this.chatMedia = new Map(); // chatId -> { media, type, timestamp }
+    this.chatMedia = new Map(); // chatId -> latest media item
+    this.chatMediaList = new Map(); // chatId -> Array of recent media items
   }
 
   addMessage(chatId, { sender, senderJid, text, isBot = false }) {
@@ -30,10 +31,38 @@ class MemoryManager {
 
   saveLatestMedia(chatId, mediaObj) {
     if (!chatId || !mediaObj) return;
-    this.chatMedia.set(chatId, {
+
+    const now = Date.now();
+    const item = {
       ...mediaObj,
-      timestamp: Date.now()
-    });
+      timestamp: mediaObj.timestamp || now,
+      messageTimestamp: mediaObj.messageTimestamp || now
+    };
+
+    // Save as latest single media
+    this.chatMedia.set(chatId, item);
+
+    // Save into rolling chat media list
+    if (!this.chatMediaList.has(chatId)) {
+      this.chatMediaList.set(chatId, []);
+    }
+    const list = this.chatMediaList.get(chatId);
+
+    // Avoid duplicate message IDs if already recorded
+    if (item.msgId) {
+      const idx = list.findIndex(m => m.msgId === item.msgId);
+      if (idx >= 0) {
+        list[idx] = item;
+        return;
+      }
+    }
+
+    list.push(item);
+
+    // Retain up to 30 recent media items per chat
+    while (list.length > 30) {
+      list.shift();
+    }
   }
 
   getLatestMedia(chatId) {
@@ -45,6 +74,50 @@ class MemoryManager {
       return null;
     }
     return item;
+  }
+
+  /**
+   * Retrieves an album or batch of media items belonging to one message or sent together.
+   * If albumId is present, matches all items in the album.
+   * Otherwise, matches items from the same sender within a 5-second window.
+   */
+  getMediaBatch(chatId, refItem = null) {
+    if (!chatId) return [];
+
+    const list = this.chatMediaList.get(chatId) || [];
+    const now = Date.now();
+    // Filter items older than 30 minutes
+    const valid = list.filter(m => (now - m.timestamp) <= 30 * 60 * 1000);
+    if (!valid.length) {
+      const single = this.getLatestMedia(chatId);
+      return single ? [single] : [];
+    }
+
+    const ref = refItem || valid[valid.length - 1];
+    if (!ref) return [];
+
+    // 1. If albumId exists, match all items with the same albumId
+    if (ref.albumId) {
+      const albumMatches = valid.filter(m => m.albumId === ref.albumId);
+      if (albumMatches.length > 0) return albumMatches;
+    }
+
+    // 2. Match by sender and close timestamps (within 5 seconds of each other)
+    const refTime = ref.messageTimestamp || ref.timestamp;
+    const refSender = ref.senderJid;
+
+    const cluster = valid.filter(m => {
+      const mTime = m.messageTimestamp || m.timestamp;
+      const isSameSender = !refSender || !m.senderJid || m.senderJid === refSender;
+      const isCloseInTime = Math.abs(mTime - refTime) <= 5000;
+      return isSameSender && isCloseInTime;
+    });
+
+    if (cluster.length > 0) {
+      return cluster;
+    }
+
+    return [ref];
   }
 
   getRecentMessages(chatId, limit) {
@@ -68,6 +141,9 @@ class MemoryManager {
     }
     if (this.chatMedia.has(chatId)) {
       this.chatMedia.delete(chatId);
+    }
+    if (this.chatMediaList.has(chatId)) {
+      this.chatMediaList.delete(chatId);
     }
     return true;
   }

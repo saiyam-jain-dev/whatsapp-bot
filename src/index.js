@@ -13,7 +13,7 @@ import pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { Boom } from '@hapi/boom';
 import { config } from './config.js';
-import { handleMessage } from './handlers.js';
+import { handleMessage, preRecordMedia } from './handlers.js';
 import { botState, startApiServer } from './server.js';
 
 const logger = pino({ level: 'silent' });
@@ -102,6 +102,13 @@ async function startBot() {
 
   sock.ev.on('messages.upsert', async (m) => {
     if (m.type !== 'notify') return;
+
+    // Pre-record incoming media in batch so albums arriving together are immediately linked in memory
+    for (const msg of m.messages) {
+      try {
+        preRecordMedia(msg);
+      } catch {}
+    }
 
     for (const msg of m.messages) {
       try {

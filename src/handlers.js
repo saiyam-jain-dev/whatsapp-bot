@@ -163,83 +163,188 @@ function findStickerMedia(msg, remoteJid) {
   return null;
 }
 
-/**
- * Finds image or GIF/video media in:
- * 1. Current message attachment
- * 2. Quoted message attachment
- * 3. Recent chat media history
- */
-function findMediaForSticker(msg, remoteJid) {
-  const root = unwrapMessage(msg.message);
+const processedBatches = new Map();
 
-  // 1. Direct message attachment
-  if (root?.imageMessage) {
-    return { media: root.imageMessage, type: 'image', source: 'direct' };
-  }
-  if (root?.videoMessage) {
-    return { media: root.videoMessage, type: 'video', source: 'direct' };
-  }
-  if (root?.documentMessage && (root.documentMessage.mimetype?.startsWith('image/') || root.documentMessage.mimetype?.startsWith('video/'))) {
-    return { media: root.documentMessage, type: 'document', source: 'direct' };
-  }
-  if (root?.stickerMessage) {
-    return { media: root.stickerMessage, type: 'sticker', source: 'direct' };
-  }
+function isBatchRecentlyProcessed(key) {
+  if (!key) return false;
+  const last = processedBatches.get(key);
+  return Boolean(last && (Date.now() - last < 15000));
+}
 
-  // 2. Quoted message attachment
-  const contextInfo = getContextInfo(root);
-  const quoted = contextInfo?.quotedMessage;
-  if (quoted) {
-    const unwrappedQuoted = unwrapMessage(quoted);
-    if (unwrappedQuoted?.imageMessage) {
-      return { media: unwrappedQuoted.imageMessage, type: 'image', source: 'quoted' };
-    }
-    if (unwrappedQuoted?.videoMessage) {
-      return { media: unwrappedQuoted.videoMessage, type: 'video', source: 'quoted' };
-    }
-    if (unwrappedQuoted?.documentMessage && (unwrappedQuoted.documentMessage.mimetype?.startsWith('image/') || unwrappedQuoted.documentMessage.mimetype?.startsWith('video/'))) {
-      return { media: unwrappedQuoted.documentMessage, type: 'document', source: 'quoted' };
-    }
-    if (unwrappedQuoted?.stickerMessage) {
-      return { media: unwrappedQuoted.stickerMessage, type: 'sticker', source: 'quoted' };
+function markBatchProcessed(key) {
+  if (!key) return;
+  processedBatches.set(key, Date.now());
+  if (processedBatches.size > 200) {
+    const cutoff = Date.now() - 30000;
+    for (const [k, v] of processedBatches.entries()) {
+      if (v < cutoff) processedBatches.delete(k);
     }
   }
-
-  // 3. Fallback: Check recent media saved from chat history
-  if (remoteJid) {
-    const recentMedia = memory.getLatestMedia(remoteJid);
-    if (recentMedia) {
-      return { ...recentMedia, source: 'chat_history' };
-    }
-  }
-
-  return null;
 }
 
 /**
- * Downloads media buffer from direct message, quoted message, or chat history.
+ * Pre-records media from any incoming message so albums and batches are linked before handlers execute.
  */
-async function getMediaBuffer(msg, remoteJid) {
-  const target = findMediaForSticker(msg, remoteJid);
-  if (!target) {
-    console.log('[Sticker] No image, GIF, or video found in direct message, quoted message, or chat history.');
-    return null;
+export function preRecordMedia(msg) {
+  if (!msg || !msg.message) return;
+  const remoteJid = msg.key?.remoteJid;
+  if (!remoteJid || remoteJid === 'status@broadcast') return;
+
+  const root = unwrapMessage(msg.message);
+  if (!root) return;
+
+  const contextInfo = getContextInfo(root);
+  const albumId =
+    msg.message?.messageContextInfo?.messageAssociation?.parentMessageKey?.id ||
+    root?.messageContextInfo?.messageAssociation?.parentMessageKey?.id ||
+    contextInfo?.messageAssociation?.parentMessageKey?.id ||
+    null;
+
+  const senderJid = normalizeJid(msg.key?.participant || msg.participant || remoteJid);
+  const msgTimestamp = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
+  const msgId = msg.key?.id;
+
+  if (root.imageMessage) {
+    memory.saveLatestMedia(remoteJid, {
+      media: root.imageMessage,
+      type: 'image',
+      msgId,
+      senderJid,
+      albumId,
+      messageTimestamp: msgTimestamp
+    });
+  } else if (root.videoMessage) {
+    memory.saveLatestMedia(remoteJid, {
+      media: root.videoMessage,
+      type: 'video',
+      msgId,
+      senderJid,
+      albumId,
+      messageTimestamp: msgTimestamp
+    });
+  } else if (root.documentMessage && (root.documentMessage.mimetype?.startsWith('image/') || root.documentMessage.mimetype?.startsWith('video/'))) {
+    memory.saveLatestMedia(remoteJid, {
+      media: root.documentMessage,
+      type: 'document',
+      msgId,
+      senderJid,
+      albumId,
+      messageTimestamp: msgTimestamp
+    });
+  } else if (root.stickerMessage) {
+    memory.saveLatestMedia(remoteJid, {
+      media: root.stickerMessage,
+      type: 'sticker',
+      msgId,
+      senderJid,
+      albumId,
+      messageTimestamp: msgTimestamp
+    });
+  }
+}
+
+/**
+ * Finds all media items belonging to a message, quoted album/message, or recent chat batch.
+ * Supports multiple photos and videos sent together in an album or burst.
+ */
+async function findMediaListForSticker(msg, remoteJid) {
+  const root = unwrapMessage(msg.message);
+  const contextInfo = getContextInfo(root);
+  const quoted = contextInfo?.quotedMessage;
+
+  // 1. Quoted message attachment
+  if (quoted) {
+    const unwrappedQuoted = unwrapMessage(quoted);
+    let quotedMedia = null;
+    let quotedType = null;
+    if (unwrappedQuoted?.imageMessage) {
+      quotedMedia = unwrappedQuoted.imageMessage;
+      quotedType = 'image';
+    } else if (unwrappedQuoted?.videoMessage) {
+      quotedMedia = unwrappedQuoted.videoMessage;
+      quotedType = 'video';
+    } else if (unwrappedQuoted?.documentMessage && (unwrappedQuoted.documentMessage.mimetype?.startsWith('image/') || unwrappedQuoted.documentMessage.mimetype?.startsWith('video/'))) {
+      quotedMedia = unwrappedQuoted.documentMessage;
+      quotedType = 'document';
+    } else if (unwrappedQuoted?.stickerMessage) {
+      quotedMedia = unwrappedQuoted.stickerMessage;
+      quotedType = 'sticker';
+    }
+
+    if (quotedMedia) {
+      const quotedSender = normalizeJid(contextInfo?.participant || (msg.key?.remoteJid?.endsWith('@g.us') ? null : remoteJid));
+      const refItem = {
+        media: quotedMedia,
+        type: quotedType,
+        senderJid: quotedSender,
+        albumId: contextInfo?.messageAssociation?.parentMessageKey?.id || null
+      };
+
+      const batch = memory.getMediaBatch(remoteJid, refItem);
+      if (batch && batch.length > 0) {
+        return batch;
+      }
+      return [{ media: quotedMedia, type: quotedType, source: 'quoted' }];
+    }
   }
 
-  try {
-    console.log(`[Sticker] Downloading media (source: ${target.source}, type: ${target.type})...`);
-    const stream = await downloadContentFromMessage(target.media, target.type);
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
-    const buffer = Buffer.concat(chunks);
-    console.log(`[Sticker] Media download completed successfully. Size: ${buffer.length} bytes.`);
-    return buffer;
-  } catch (err) {
-    console.error('[Sticker Download Error]:', err.message);
-    return null;
+  // 2. Direct message attachment
+  let directMedia = null;
+  let directType = null;
+  if (root?.imageMessage) {
+    directMedia = root.imageMessage;
+    directType = 'image';
+  } else if (root?.videoMessage) {
+    directMedia = root.videoMessage;
+    directType = 'video';
+  } else if (root?.documentMessage && (root.documentMessage.mimetype?.startsWith('image/') || root.documentMessage.mimetype?.startsWith('video/'))) {
+    directMedia = root.documentMessage;
+    directType = 'document';
+  } else if (root?.stickerMessage) {
+    directMedia = root.stickerMessage;
+    directType = 'sticker';
   }
+
+  if (directMedia) {
+    const albumId =
+      msg.message?.messageContextInfo?.messageAssociation?.parentMessageKey?.id ||
+      root?.messageContextInfo?.messageAssociation?.parentMessageKey?.id ||
+      contextInfo?.messageAssociation?.parentMessageKey?.id ||
+      null;
+    const msgTimestamp = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
+    const senderJid = normalizeJid(msg.key?.participant || msg.participant || remoteJid);
+
+    const refItem = {
+      media: directMedia,
+      type: directType,
+      msgId: msg.key?.id,
+      senderJid,
+      albumId,
+      messageTimestamp: msgTimestamp
+    };
+
+    // Ensure memory has current media saved
+    memory.saveLatestMedia(remoteJid, refItem);
+
+    // Give concurrent messages in the same album 300ms to arrive and register
+    await new Promise(r => setTimeout(r, 300));
+
+    const batch = memory.getMediaBatch(remoteJid, refItem);
+    if (batch && batch.length > 0) {
+      return batch;
+    }
+    return [{ media: directMedia, type: directType, source: 'direct' }];
+  }
+
+  // 3. Fallback: Check recent media batch saved from chat history
+  if (remoteJid) {
+    const batch = memory.getMediaBatch(remoteJid);
+    if (batch && batch.length > 0) {
+      return batch;
+    }
+  }
+
+  return [];
 }
 
 /**
@@ -364,18 +469,8 @@ export async function handleMessage(sock, msg) {
 
   const trimmedText = rawText.trim();
 
-  // If this message contains an image, video/GIF, or sticker in a group, save to media history
-  if (isGroup) {
-    if (rootContent.imageMessage) {
-      memory.saveLatestMedia(remoteJid, { media: rootContent.imageMessage, type: 'image' });
-    } else if (rootContent.videoMessage) {
-      memory.saveLatestMedia(remoteJid, { media: rootContent.videoMessage, type: 'video' });
-    } else if (rootContent.documentMessage && (rootContent.documentMessage.mimetype?.startsWith('image/') || rootContent.documentMessage.mimetype?.startsWith('video/'))) {
-      memory.saveLatestMedia(remoteJid, { media: rootContent.documentMessage, type: 'document' });
-    } else if (rootContent.stickerMessage) {
-      memory.saveLatestMedia(remoteJid, { media: rootContent.stickerMessage, type: 'sticker' });
-    }
-  }
+  // If this message contains an image, video/GIF, or sticker, save to media history
+  preRecordMedia(msg);
 
   // Check quoted context
   const contextInfo = getContextInfo(rootContent);
@@ -668,37 +763,81 @@ export async function handleMessage(sock, msg) {
   // 6. Sticker command (@sam s, @sam sticker, !s, or natural language "create sticker", "make sticker")
   if (isStickerIntent(commandBody) || isStickerIntent(firstWord)) {
     console.log(`[Sticker Command] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
-    const mediaBuffer = await getMediaBuffer(msg, remoteJid);
-    if (!mediaBuffer) {
+    const mediaList = await findMediaListForSticker(msg, remoteJid);
+
+    if (!mediaList || mediaList.length === 0) {
       return replyWithTyping(
         sock,
         remoteJid,
-        `No photo or GIF found to convert! You can:\n1. Reply to any photo or GIF with *@sam s* (or *@sam create sticker*)\n2. Send a photo or GIF with caption *@sam s*\n3. Type *@sam s* right after a photo or GIF was shared in this chat.`,
+        `No photo, GIF, or video found to convert! You can:\n1. Reply to any photo, GIF, or video with *@sam s* (or *!s*)\n2. Send photos or videos with caption *@sam s*\n3. Type *@sam s* right after media was shared in this chat.`,
         msg
       );
     }
 
-    try {
-      console.log(`[Sticker] Formatting media (${mediaBuffer.length} bytes) to WebP sticker...`);
-      const stickerBuffer = await createSticker(mediaBuffer, {
-        pack: `${config.botName} Pack`,
-        author: senderName
-      });
-      console.log(`[Sticker] Sticker generated (${stickerBuffer.length} bytes). Sending to ${remoteJid}...`);
+    // Deduplication check: avoid reprocessing the same album or burst within 15 seconds
+    const firstItem = mediaList[0];
+    const albumId = firstItem.albumId;
+    const batchKey = albumId
+      ? `album:${albumId}`
+      : `batch:${firstItem.senderJid || remoteJid}:${Math.floor((firstItem.messageTimestamp || Date.now()) / 5000)}`;
 
-      try {
-        await sock.sendMessage(remoteJid, { sticker: stickerBuffer }, { quoted: msg });
-      } catch (sendErr) {
-        console.warn('[Sticker] Quoted send failed, falling back to direct send:', sendErr.message);
-        await sock.sendMessage(remoteJid, { sticker: stickerBuffer });
-      }
-
-      console.log(`[Sticker] Sticker successfully delivered!`);
+    if (isBatchRecentlyProcessed(batchKey)) {
+      console.log(`[Sticker] Skipping duplicate trigger for batch key: ${batchKey}`);
       return;
-    } catch (err) {
-      console.error('[Sticker Processing Error]:', err.message);
-      return replyWithTyping(sock, remoteJid, `Could not generate sticker: ${err.message}`, msg);
     }
+    markBatchProcessed(batchKey);
+
+    const count = mediaList.length;
+    console.log(`[Sticker] Processing ${count} media item(s) into stickers...`);
+    await sock.sendPresenceUpdate('composing', remoteJid);
+
+    let successCount = 0;
+    for (let i = 0; i < count; i++) {
+      const item = mediaList[i];
+      try {
+        console.log(`[Sticker] Downloading item ${i + 1}/${count} (type: ${item.type})...`);
+        const stream = await downloadContentFromMessage(item.media, item.type === 'document' ? 'document' : item.type);
+        const chunks = [];
+        for await (const chunk of stream) {
+          chunks.push(chunk);
+        }
+        const mediaBuffer = Buffer.concat(chunks);
+
+        console.log(`[Sticker] Formatting item ${i + 1}/${count} (${mediaBuffer.length} bytes) to WebP sticker...`);
+        const stickerBuffer = await createSticker(mediaBuffer, {
+          pack: `${config.botName} Pack`,
+          author: senderName
+        });
+
+        console.log(`[Sticker] Sticker ${i + 1}/${count} generated (${stickerBuffer.length} bytes). Sending...`);
+        try {
+          await sock.sendMessage(
+            remoteJid,
+            { sticker: stickerBuffer },
+            i === 0 ? { quoted: msg } : {}
+          );
+        } catch (sendErr) {
+          console.warn('[Sticker] Quoted send failed, falling back to direct send:', sendErr.message);
+          await sock.sendMessage(remoteJid, { sticker: stickerBuffer });
+        }
+
+        successCount++;
+
+        // Add 400ms delay between stickers if sending multiple so WhatsApp displays them in order
+        if (i < count - 1) {
+          await new Promise(r => setTimeout(r, 400));
+        }
+      } catch (itemErr) {
+        console.error(`[Sticker] Failed converting item ${i + 1}/${count}:`, itemErr.message);
+      }
+    }
+
+    if (successCount === 0) {
+      return replyWithTyping(sock, remoteJid, `Could not generate sticker from the selected media.`, msg);
+    }
+
+    console.log(`[Sticker] Successfully delivered ${successCount}/${count} sticker(s)!`);
+    return;
   }
 
   // 7. Profile Picture (PFP / DP / Avatar) command
