@@ -1,8 +1,5 @@
 import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
-try {
-  dns.setServers(['1.1.1.1', '1.0.0.1']);
-} catch {}
 
 process.on('uncaughtException', (err) => {
   console.error('[Process Uncaught Exception]:', err?.message || err);
@@ -11,18 +8,6 @@ process.on('uncaughtException', (err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[Process Unhandled Rejection]:', reason?.message || reason);
 });
-
-import { Agent, setGlobalDispatcher } from 'undici';
-setGlobalDispatcher(
-  new Agent({
-    connect: {
-      family: 4,
-      timeout: 15000
-    },
-    keepAliveTimeout: 120000,
-    keepAliveMaxTimeout: 600000
-  })
-);
 
 import path from 'path';
 import {
@@ -42,8 +27,27 @@ import { warmUpAI } from './ai.js';
 
 const logger = pino({ level: 'silent' });
 let apiServerStarted = false;
+let reconnectTimeout = null;
+let isStarting = false;
 
 async function startBot() {
+  if (isStarting) return;
+  isStarting = true;
+
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout);
+    reconnectTimeout = null;
+  }
+
+  // Clean up any existing socket before creating a new one
+  if (botState.sock) {
+    try {
+      botState.sock.ev?.removeAllListeners();
+      botState.sock.ws?.close();
+    } catch {}
+    botState.sock = null;
+  }
+
   if (!apiServerStarted) {
     startApiServer(3001);
     apiServerStarted = true;
@@ -67,7 +71,7 @@ async function startBot() {
     logger,
     printQRInTerminal: false,
     auth: state,
-    browser: Browsers.windows('Desktop'),
+    browser: Browsers.macOS('Chrome'),
     syncFullHistory: false,
     generateHighQualityLinkPreview: true
   });
@@ -95,18 +99,31 @@ async function startBot() {
         ? lastDisconnect.error.output?.statusCode
         : null;
 
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`[!] Connection closed. Reason code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
+      const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+      const isReplaced = statusCode === DisconnectReason.connectionReplaced;
+      const shouldReconnect = !isLoggedOut;
+
+      console.log(`[!] Connection closed. Reason code: ${statusCode} (${isReplaced ? 'connectionReplaced' : 'normal'}). Reconnecting: ${shouldReconnect}`);
 
       if (shouldReconnect) {
-        console.log('[*] Reconnecting in 3 seconds...\n');
-        setTimeout(() => {
-          startBot();
-        }, 3000);
+        const delayMs = isReplaced ? 6000 : 3000;
+        if (!reconnectTimeout) {
+          console.log(`[*] Scheduling reconnect in ${delayMs / 1000} seconds...\n`);
+          reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            isStarting = false;
+            startBot();
+          }, delayMs);
+        }
       } else {
         console.log('[X] Device was logged out. To pair again, delete the auth_session directory and restart.');
       }
     } else if (connection === 'open') {
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      isStarting = false;
       botState.status = 'connected';
       botState.qr = null;
       botState.user = sock.user;
