@@ -4,6 +4,7 @@ import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
 import { createSticker } from './sticker.js';
 import { textToVoiceNote } from './tts.js';
+import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
 
 /**
  * Unwraps nested WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, edited).
@@ -311,6 +312,16 @@ export async function handleMessage(sock, msg) {
     });
   }
 
+  // AUTO-DOWNLOAD INSTAGRAM REEL LINKS:
+  // If any message contains an Instagram Reel URL, automatically download and deliver the video
+  // without requiring any syntax, command prefix, or mention.
+  const igMatch = trimmedText.match(INSTAGRAM_REEL_REGEX);
+  if (igMatch) {
+    const reelUrl = igMatch[0].startsWith('http') ? igMatch[0] : `https://${igMatch[0]}`;
+    await downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl);
+    return;
+  }
+
   // STRICT TRIGGER POLICY:
   // The bot MUST ONLY respond if an explicit command is invoked:
   // 1. Starts with @explaintts
@@ -441,12 +452,13 @@ export async function handleMessage(sock, msg) {
       `• *@sam tts <text>* or *!tts* - Convert text to voice note\n` +
       `• *@sam s* or *!s* - Turn photo, GIF, or video into sticker\n` +
       `• *@sam pfp [@user|reply]* or *!pfp* - Fetch profile picture of group member\n` +
+      `• *Instagram Reel Links* - Send any Instagram Reel link and SamAi downloads it automatically (no command needed!)\n` +
       `• *@sam summary* or *!summary* - Summarize recent group chat\n` +
       `• *@sam ping* or *!ping* - Check bot connection and latency\n` +
       `• *@sam clear* or *!clear* - Clear recent chat context\n` +
       `• *@sam help* or *!help* - Show this menu\n\n` +
-      `*Strict Command Policy:*\n` +
-      `SamAi strictly stays silent and never replies to messages unless explicitly called with *@sam*, *@explaintts*, or *!*.`;
+      `*Trigger Policy:*\n` +
+      `SamAi stays silent and never replies to messages unless an Instagram Reel link is shared, or explicitly called with *@sam*, *@explaintts*, or *!*.`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -724,20 +736,53 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 7. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 7. Instagram Reel Command (@sam reel, !reel, @sam ig, !ig, @sam download)
+  if (['reel', 'reels', 'ig', 'igdl', 'download'].includes(firstWord)) {
+    let targetUrl = commandArgs;
+    if (!targetUrl) {
+      const quoted = contextInfo?.quotedMessage;
+      if (quoted) {
+        const unwrappedQuoted = unwrapMessage(quoted);
+        const qText =
+          unwrappedQuoted?.conversation ||
+          unwrappedQuoted?.extendedTextMessage?.text ||
+          unwrappedQuoted?.imageMessage?.caption ||
+          unwrappedQuoted?.videoMessage?.caption ||
+          '';
+        const qMatch = qText.match(INSTAGRAM_REEL_REGEX);
+        if (qMatch) {
+          targetUrl = qMatch[0];
+        }
+      }
+    }
+    const match = targetUrl?.match(INSTAGRAM_REEL_REGEX);
+    if (match) {
+      const reelUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
+      await downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl);
+      return;
+    }
+    return replyWithTyping(
+      sock,
+      remoteJid,
+      `No Instagram Reel link found! You can:\n1. Send any Instagram Reel link directly in chat (no command needed!)\n2. Reply to a message with *@sam reel*\n3. Type *@sam reel <link>*`,
+      msg
+    );
+  }
+
+  // 8. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 8. Clear command (@sam clear, !clear)
+  // 9. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 9. Conversational AI Prompt
+  // 10. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;

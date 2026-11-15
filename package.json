@@ -23,6 +23,7 @@
   "author": "Saiyam Jain",
   "license": "MIT",
   "dependencies": {
+    "@coflyn/scrapr": "^1.4.0",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
@@ -34,6 +35,7 @@
     "pino": "^10.4.0",
     "qrcode-terminal": "^0.12.0",
     "sharp": "^0.35.5",
+    "snapsave-media-downloader": "^2.5.1",
     "wa-sticker-formatter": "^4.4.4"
   }
 }

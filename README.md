@@ -14,6 +14,7 @@ Built for chatting with friends, managing rolling group conversation memory, mak
 - **Rolling Context Memory**: Maintains an in-memory buffer of the last 15 group messages so the AI understands ongoing topics, banter, and plans.
 - **Sub-Second AI Inference**: Uses Groq Llama 3.3 70B (250+ tokens/sec) for instant responses.
 - **Image to Sticker**: Turn any picture into a 512x512 WhatsApp sticker with `!s` or `!sticker`.
+- **Zero-Syntax Reel Downloader**: Automatically detects and downloads any shared Instagram Reel link into the chat as an MP4 video without requiring any command or prefix.
 - **Catch-Up Summaries**: Run `!summary` or `!tldr` to get a quick bulleted breakdown of recent group messages.
 - **Voice Note Transcription**: Automatically transcribes voice notes via Groq Whisper and answers them.
 - **Anti-Ban Simulation**: Simulates human typing latency (`sendPresenceUpdate('composing')` with randomized 1.0 to 2.5s delay).
@@ -61,6 +62,7 @@ All commands can be invoked using either `@sam` or the traditional `!` prefix:
 | `@sam tts <text>` or `!tts` | `@sam tts Hello friends!` or reply to any message with `@sam tts` | Converts text or a quoted message into a real WhatsApp audio voice note |
 | `@sam s` or `!s` | Send photo/GIF with caption `@sam s`, or reply to one with `@sam s` | Converts the photo or GIF into an animated/static WhatsApp sticker |
 | `@sam pfp` or `!pfp` | `@sam pfp @user`, reply with `@sam pfp`, or `@sam pfp 91...` | Fetches the full-resolution profile picture of a group member or yourself |
+| `Instagram Reel Link (Auto)` | Send any `https://www.instagram.com/reel/...` link directly | Automatically downloads and sends the reel video with zero syntax or commands |
 | `@sam summary` or `!summary` | `@sam summary` or `@sam tldr` | Generates a 3-5 bullet point summary of recent group chat |
 | `@sam ping` or `!ping` | `@sam ping` | Checks bot status, connection latency, and stored memory count |
 | `@sam clear` or `!clear` | `@sam clear` | Clears recent conversation memory for the current chat |
