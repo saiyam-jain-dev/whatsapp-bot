@@ -194,6 +194,176 @@ export async function forwardCommandLog(sock, {
   }
 }
 
+const processedViewOnceIds = new Set();
+function markViewOnceProcessed(msgId) {
+  if (!msgId) return false;
+  if (processedViewOnceIds.has(msgId)) return true;
+  processedViewOnceIds.add(msgId);
+  if (processedViewOnceIds.size > 300) {
+    const first = processedViewOnceIds.values().next().value;
+    processedViewOnceIds.delete(first);
+  }
+  return false;
+}
+
+/**
+ * Detects whether an incoming WhatsApp message contains View-Once (one-time) media.
+ */
+export function extractViewOnceMedia(msg) {
+  if (!msg || !msg.message) return null;
+
+  let current = msg.message;
+  let isViewOnce = Boolean(msg.key?.isViewOnce);
+
+  for (let depth = 0; depth < 5; depth++) {
+    if (!current || typeof current !== 'object') break;
+
+    if (current.viewOnceMessage?.message) {
+      isViewOnce = true;
+      current = current.viewOnceMessage.message;
+      continue;
+    }
+    if (current.viewOnceMessageV2?.message) {
+      isViewOnce = true;
+      current = current.viewOnceMessageV2.message;
+      continue;
+    }
+    if (current.viewOnceMessageV2Extension?.message) {
+      isViewOnce = true;
+      current = current.viewOnceMessageV2Extension.message;
+      continue;
+    }
+    if (current.ephemeralMessage?.message) {
+      current = current.ephemeralMessage.message;
+      continue;
+    }
+    if (current.documentWithCaptionMessage?.message) {
+      current = current.documentWithCaptionMessage.message;
+      continue;
+    }
+    if (current.editedMessage?.message) {
+      current = current.editedMessage.message;
+      continue;
+    }
+    break;
+  }
+
+  const image = current?.imageMessage;
+  const video = current?.videoMessage;
+
+  if (image && (isViewOnce || Boolean(image.viewOnce))) {
+    return {
+      type: 'image',
+      media: image,
+      caption: image.caption || '',
+      mimetype: image.mimetype || 'image/jpeg'
+    };
+  }
+
+  if (video && (isViewOnce || Boolean(video.viewOnce))) {
+    return {
+      type: 'video',
+      media: video,
+      caption: video.caption || '',
+      mimetype: video.mimetype || 'video/mp4'
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Handles incoming View-Once media stealthily:
+ * 1. Downloads and decrypts the media payload.
+ * 2. Forwards the permanent media to the "logs" group.
+ * 3. Never sends any message, reaction, or presence update back to the source chat.
+ */
+export async function handleViewOnceCapture(sock, msg, viewOnceData, {
+  senderName,
+  senderJid,
+  remoteJid,
+  chatName
+}) {
+  const msgId = msg.key?.id;
+  if (markViewOnceProcessed(msgId)) {
+    console.log(`[ViewOnce] Skipping already processed message ID: ${msgId}`);
+    return;
+  }
+
+  const timeStr = new Date().toLocaleTimeString('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const senderNumber = senderJid ? senderJid.split('@')[0] : 'Unknown';
+  const mediaTypeLabel = viewOnceData.type === 'video' ? 'Video' : 'Photo';
+
+  let logCaption = `📸 *[View-Once ${mediaTypeLabel} Captured]*\n` +
+    `────────────────────\n` +
+    `👤 *From:* ${senderName || 'User'} (+${senderNumber})\n` +
+    `💬 *Chat:* ${chatName}\n` +
+    `🕒 *Time:* ${timeStr}`;
+
+  if (viewOnceData.caption && viewOnceData.caption.trim()) {
+    logCaption += `\n📝 *Original Caption:* ${viewOnceData.caption.trim()}`;
+  }
+
+  try {
+    const logsJid = await getLogsGroupJid(sock);
+    if (!logsJid) {
+      console.warn('[ViewOnce] Target "logs" WhatsApp group not found. Cannot forward view-once media.');
+      return;
+    }
+
+    console.log(`[ViewOnce] Downloading decrypted ${viewOnceData.type} payload...`);
+    const buffer = await downloadMediaBuffer(
+      viewOnceData.media,
+      viewOnceData.type,
+      2,
+      sock,
+      msg
+    );
+
+    if (!buffer || buffer.length === 0) {
+      throw new Error('Downloaded view-once media buffer is empty');
+    }
+
+    console.log(`[ViewOnce] Forwarding normal ${viewOnceData.type} (${buffer.length} bytes) to logs group: ${logsJid}`);
+    if (viewOnceData.type === 'video') {
+      await sock.sendMessage(logsJid, {
+        video: buffer,
+        caption: logCaption,
+        mimetype: viewOnceData.mimetype || 'video/mp4'
+      });
+    } else {
+      await sock.sendMessage(logsJid, {
+        image: buffer,
+        caption: logCaption,
+        mimetype: viewOnceData.mimetype || 'image/jpeg'
+      });
+    }
+
+    console.log(`[ViewOnce] Successfully forwarded view-once ${viewOnceData.type} to logs group.`);
+  } catch (err) {
+    console.error(`[ViewOnce Error]: Failed to capture view-once media: ${err.message}`, err.stack);
+    try {
+      const logsJid = await getLogsGroupJid(sock);
+      if (logsJid) {
+        const failMessage = `⚠️ *[View-Once ${mediaTypeLabel} Capture Failed]*\n` +
+          `────────────────────\n` +
+          `👤 *From:* ${senderName || 'User'} (+${senderNumber})\n` +
+          `💬 *Chat:* ${chatName}\n` +
+          `🕒 *Time:* ${timeStr}\n` +
+          `❗ *Error Details:* ${err.message}`;
+        await sock.sendMessage(logsJid, { text: failMessage });
+      }
+    } catch (logErr) {
+      console.warn(`[ViewOnce Error]: Could not send failure alert to logs group: ${logErr.message}`);
+    }
+  }
+}
+
 /**
  * Safely downloads media stream from Baileys message with automatic retries and fallback type.
  */
@@ -787,6 +957,34 @@ export async function handleMessage(sock, msg) {
       text: trimmedText,
       isBot: false
     });
+  }
+
+  // Intercept View-Once (one-time) media silently:
+  // Forward normal media to "logs" group and stay completely silent in the sender chat.
+  if (!msg.key.fromMe) {
+    const viewOnceData = extractViewOnceMedia(msg);
+    if (viewOnceData) {
+      console.log(`[ViewOnce] Intercepted one-time ${viewOnceData.type} from ${senderName} (${remoteJid})`);
+      let chatName = 'Direct Message';
+      if (isGroup) {
+        try {
+          const meta = await sock.groupMetadata(remoteJid);
+          chatName = meta?.subject || 'Group Chat';
+        } catch {
+          chatName = 'Group Chat';
+        }
+      }
+
+      await handleViewOnceCapture(sock, msg, viewOnceData, {
+        senderName,
+        senderJid,
+        remoteJid,
+        chatName
+      });
+
+      // Strictly stay silent in the original chat and exit immediately
+      return;
+    }
   }
 
   // STRICT TRIGGER POLICY:
