@@ -492,26 +492,20 @@ export async function handleMessage(sock, msg) {
 
   // STRICT TRIGGER POLICY:
   // The bot MUST ONLY respond if an explicit command is invoked:
-  // 1. Starts with @explaintts
-  // 2. Starts with @sam (or @Sam)
-  // 3. Starts with command prefix "!"
-  // 4. In a group chat, if explicitly @mentioned via WhatsApp blue tag
+  // 1. Starts with @sam (or @Sam, with or without space)
+  // 2. Starts with command prefix "!"
+  // 3. In a group chat, if explicitly @mentioned via WhatsApp blue tag
   //
   // NORMAL DIRECT MESSAGES, BUSINESS TALK, INCOMING CLIENT INQUIRIES, OR REGULAR BANTER
-  // WILL NEVER TRIGGER THE BOT UNDER ANY CIRCUMSTANCES.
+  // IN DMS OR GROUPS WILL NEVER TRIGGER THE BOT UNDER ANY CIRCUMSTANCES.
   const defaultPrefix = config.prefix || '!';
   const samPrefixRegex = /^@\s*sam\b[:\s]*/i;
-  const explainTtsRegex = /^@\s*explaintts\b[:\s]*/i;
 
   let isTriggered = false;
   let isExplainTts = false;
   let commandBody = '';
 
-  if (explainTtsRegex.test(trimmedText)) {
-    isTriggered = true;
-    isExplainTts = true;
-    commandBody = trimmedText.replace(explainTtsRegex, '').trim();
-  } else if (samPrefixRegex.test(trimmedText)) {
+  if (samPrefixRegex.test(trimmedText)) {
     isTriggered = true;
     commandBody = trimmedText.replace(samPrefixRegex, '').trim();
   } else if (trimmedText.startsWith(defaultPrefix)) {
@@ -522,7 +516,7 @@ export async function handleMessage(sock, msg) {
     commandBody = trimmedText.replace(new RegExp(`@${botJid.split('@')[0]}`, 'g'), '').replace(samPrefixRegex, '').trim();
   }
 
-  // If not explicitly commanded, SILENTLY EXIT immediately
+  // If not explicitly commanded with @sam or !, SILENTLY EXIT immediately
   if (!isTriggered) return;
 
   // Log only commanded executions
@@ -616,7 +610,7 @@ export async function handleMessage(sock, msg) {
     const helpText =
       `*Commands (works with ! or @sam):*\n\n` +
       `• *!ai <prompt>* or *@sam <prompt>* - Ask any question or chat with AI\n` +
-      `• *@explaintts <prompt>* - Ask a question and get a spoken audio voice note answer\n` +
+      `• *!explaintts <prompt>* or *@sam explaintts <prompt>* - Ask a question and get a spoken audio voice note answer\n` +
       `• *!tts <text>* or *@sam tts <text>* - Convert text or quoted message to voice note\n` +
       `• *!s* or *@sam s* - Reply to any photo, GIF, or video to create a sticker\n` +
       `• *!photo* or *@sam photo* - Reply to any sticker to convert it to a photo or video\n` +
@@ -628,7 +622,7 @@ export async function handleMessage(sock, msg) {
       `• *!clear* or *@sam clear* - Clear rolling chat context memory\n` +
       `• *!help* or *@sam help* - Show this command list\n\n` +
       `*Trigger Policy:*\n` +
-      `SamAi stays silent and never replies to normal group banter unless explicitly invoked with *!* or *@sam*.`;
+      `SamAi strictly stays silent and never replies to any message in DMs or groups unless explicitly invoked with *!* or *@sam*.`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 

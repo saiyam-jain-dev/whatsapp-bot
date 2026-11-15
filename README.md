@@ -59,7 +59,7 @@ All commands can be invoked using either `@sam` or the traditional `!` prefix:
 | Command | Usage Example | Description |
 |---|---|---|
 | `@sam <prompt>` or `!ai <prompt>` | `@sam what movie should we watch tonight?` | Ask @sam anything directly (also answers when replied to) |
-| `@explaintts <prompt>` | `@explaintts why is the sky blue?` | Asks the AI and replies with an authentic audio voice note explanation |
+| `@sam explaintts <prompt>` or `!explaintts` | `@sam explaintts why is the sky blue?` | Asks the AI and replies with an authentic audio voice note explanation |
 | `@sam tts <text>` or `!tts` | `@sam tts Hello friends!` or reply to any message with `@sam tts` | Converts text or a quoted message into a real WhatsApp audio voice note |
 | `@sam s` or `!s` | Send photo/GIF with caption `@sam s`, or reply to one with `@sam s` | Converts the photo or GIF into an animated/static WhatsApp sticker |
 | `@sam photo` or `!photo` | Reply to any sticker with `!photo`, or caption with `!photo` | Converts static sticker to PNG photo, or animated sticker to MP4 video |
