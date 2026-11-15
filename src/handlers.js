@@ -228,13 +228,17 @@ function markBatchProcessed(key) {
 /**
  * Pre-records media from any incoming message so albums and batches are linked before handlers execute.
  */
-export function preRecordMedia(msg) {
+export function preRecordMedia(msg, sock = null) {
   if (!msg || !msg.message) return;
   const remoteJid = msg.key?.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
 
   const root = unwrapMessage(msg.message);
   if (!root) return;
+
+  const isGroup = remoteJid.endsWith('@g.us');
+  const botJidRaw = sock?.user?.id || '';
+  const botJid = botJidRaw ? (botJidRaw.split(':')[0] + '@s.whatsapp.net') : '';
 
   const contextInfo = getContextInfo(root);
   const albumId =
@@ -243,7 +247,10 @@ export function preRecordMedia(msg) {
     contextInfo?.messageAssociation?.parentMessageKey?.id ||
     null;
 
-  const senderJid = normalizeJid(msg.key?.participant || msg.participant || remoteJid);
+  const senderJidRaw = msg.key?.fromMe
+    ? (botJid || msg.key?.participant || remoteJid)
+    : (isGroup ? (msg.key?.participant || msg.participant || '') : remoteJid);
+  const senderJid = normalizeJid(senderJidRaw);
   const msgTimestamp = (msg.messageTimestamp ? Number(msg.messageTimestamp) * 1000 : Date.now());
   const msgId = msg.key?.id;
 
@@ -489,10 +496,12 @@ export async function handleMessage(sock, msg) {
 
   const isGroup = remoteJid.endsWith('@g.us');
   const botJidRaw = sock.user?.id || '';
-  const botJid = botJidRaw.split(':')[0] + '@s.whatsapp.net';
-  const senderJidRaw = isGroup ? (msg.key.participant || msg.participant || '') : remoteJid;
+  const botJid = botJidRaw ? (botJidRaw.split(':')[0] + '@s.whatsapp.net') : '';
+  const senderJidRaw = msg.key.fromMe
+    ? (botJid || msg.key.participant || remoteJid)
+    : (isGroup ? (msg.key.participant || msg.participant || '') : remoteJid);
   const senderJid = normalizeJid(senderJidRaw);
-  const senderName = msg.pushName || 'Friend';
+  const senderName = msg.pushName || (msg.key.fromMe ? (sock.user?.name || 'You') : 'Friend');
 
   const rootContent = unwrapMessage(msg.message);
   if (!rootContent) return;
@@ -509,7 +518,7 @@ export async function handleMessage(sock, msg) {
   const trimmedText = rawText.trim();
 
   // If this message contains an image, video/GIF, or sticker, save to media history
-  preRecordMedia(msg);
+  preRecordMedia(msg, sock);
 
   // Check quoted context
   const contextInfo = getContextInfo(rootContent);
@@ -875,21 +884,33 @@ export async function handleMessage(sock, msg) {
     let targetJid = null;
     let targetName = null;
 
-    // A. Check if another user was @mentioned (excluding the bot itself)
-    const otherMentions = mentionedJids.filter(jid => {
-      const normalized = jid.split('@')[0];
-      return jid !== botJid && jid !== botJidRaw && normalized !== botJid.split('@')[0];
-    });
-
-    if (otherMentions.length > 0) {
-      targetJid = otherMentions[0];
+    // Check for explicit self intent (e.g. "@sam my pfp", "@sam pfp me", "!pfp me")
+    if (/\b(me|my|myself|self)\b/i.test(commandBody)) {
+      targetJid = senderJid;
     }
 
-    // B. Check if quoting a message
+    // A. Check if another user was @mentioned (excluding the bot itself)
+    if (!targetJid) {
+      const otherMentions = mentionedJids.filter(jid => {
+        const normalized = jid.split('@')[0];
+        return jid !== botJid && jid !== botJidRaw && normalized !== botJid.split('@')[0];
+      });
+
+      if (otherMentions.length > 0) {
+        targetJid = otherMentions[0];
+      }
+    }
+
+    // B. Check if quoting / highlighting a message
     if (!targetJid) {
       const quoted = contextInfo?.quotedMessage;
       if (quoted) {
-        targetJid = contextInfo?.participant || (isGroup ? null : remoteJid);
+        const quotedParticipant = contextInfo?.participant;
+        if (quotedParticipant) {
+          targetJid = quotedParticipant;
+        } else if (!isGroup) {
+          targetJid = msg.key.fromMe ? remoteJid : botJid;
+        }
       }
     }
 
@@ -908,7 +929,7 @@ export async function handleMessage(sock, msg) {
       }
     }
 
-    // E. Fallback: target sender themselves
+    // E. Fallback: if not highlighting a message, always target sender themselves (own profile picture)
     if (!targetJid) {
       targetJid = senderJid;
     }
@@ -928,9 +949,12 @@ export async function handleMessage(sock, msg) {
     targetJid = normalizeJid(targetJid);
 
     // Resolve target display name
-    if (targetJid === remoteJid) {
+    const isSelfTarget = targetJid === senderJid || (msg.key.fromMe && targetJid === botJid);
+    const isGroupTarget = targetJid === remoteJid && isGroup;
+
+    if (isGroupTarget) {
       targetName = 'Group';
-    } else if (targetJid === senderJid) {
+    } else if (isSelfTarget) {
       targetName = senderName;
     } else {
       const recent = memory.getRecentMessages(remoteJid);
@@ -956,8 +980,7 @@ export async function handleMessage(sock, msg) {
       }
 
       if (!pfpUrl) {
-        const isSelf = targetJid === senderJid;
-        const isGroupTarget = targetJid === remoteJid;
+        const isSelf = isSelfTarget;
         const targetDisplay = isGroupTarget
           ? 'this group'
           : isSelf
@@ -1006,8 +1029,7 @@ export async function handleMessage(sock, msg) {
 
       const heading = '*SamAi- bot by sammy*';
       const divider = '────────────────────';
-      const isSelf = targetJid === senderJid;
-      const isGroupTarget = targetJid === remoteJid;
+      const isSelf = isSelfTarget;
 
       let captionTitle = '';
       if (isGroupTarget) {

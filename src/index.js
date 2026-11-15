@@ -119,7 +119,7 @@ async function startBot() {
     // Pre-record incoming media in batch so albums arriving together are immediately linked in memory
     for (const msg of m.messages) {
       try {
-        preRecordMedia(msg);
+        preRecordMedia(msg, sock);
       } catch {}
     }
 
