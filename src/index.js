@@ -14,7 +14,7 @@ const undiciAgent = new Agent({
         callback = options;
         options = {};
       }
-      if (hostname === 'a.whatsapp.net') {
+      if (/^[a-z]\.whatsapp\.net$/i.test(hostname)) {
         hostname = 'mmg.whatsapp.net';
       }
       if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {

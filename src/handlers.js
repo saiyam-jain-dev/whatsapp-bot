@@ -32,7 +32,7 @@ const mediaHttpsAgent = new https.Agent({
       callback = options;
       options = {};
     }
-    if (hostname === 'a.whatsapp.net') {
+    if (/^[a-z]\.whatsapp\.net$/i.test(hostname)) {
       hostname = 'mmg.whatsapp.net';
     }
     if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
@@ -74,10 +74,10 @@ function extractHost(url) {
  */
 async function downloadMediaDirectWithAxios(media, type) {
   let fallbackHost = extractHost(media.url);
-  if (!fallbackHost || fallbackHost === 'a.whatsapp.net') {
+  if (!fallbackHost || /^[a-z]\.whatsapp\.net$/i.test(fallbackHost)) {
     fallbackHost = 'mmg.whatsapp.net';
   }
-  const cleanUrl = media.url ? media.url.replace('a.whatsapp.net', 'mmg.whatsapp.net') : null;
+  const cleanUrl = media.url ? media.url.replace(/:\/\/[a-z]\.whatsapp\.net/i, '://mmg.whatsapp.net') : null;
   const downloadUrl = media.directPath
     ? getUrlFromDirectPath(media.directPath, fallbackHost)
     : cleanUrl;
@@ -138,8 +138,8 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
 
   const cleanMedia = {
     ...media,
-    url: (media?.url && media.url.includes('a.whatsapp.net'))
-      ? media.url.replace('a.whatsapp.net', 'mmg.whatsapp.net')
+    url: (media?.url && /:\/\/[a-z]\.whatsapp\.net/i.test(media.url))
+      ? media.url.replace(/:\/\/[a-z]\.whatsapp\.net/i, '://mmg.whatsapp.net')
       : (media?.url || 'https://mmg.whatsapp.net')
   };
 
