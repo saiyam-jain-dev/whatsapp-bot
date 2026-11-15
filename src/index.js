@@ -41,6 +41,26 @@ const undiciAgent = new Agent({
 });
 setGlobalDispatcher(undiciAgent);
 
+import fs from 'node:fs';
+import path from 'path';
+
+const botLogStream = fs.createWriteStream(path.resolve('bot.log'), { flags: 'a' });
+const _log = console.log;
+const _err = console.error;
+const _warn = console.warn;
+console.log = (...args) => {
+  try { botLogStream.write(`[${new Date().toISOString()}] [LOG] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ') + '\n'); } catch {}
+  _log(...args);
+};
+console.error = (...args) => {
+  try { botLogStream.write(`[${new Date().toISOString()}] [ERR] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ') + '\n'); } catch {}
+  _err(...args);
+};
+console.warn = (...args) => {
+  try { botLogStream.write(`[${new Date().toISOString()}] [WARN] ` + args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ') + '\n'); } catch {}
+  _warn(...args);
+};
+
 process.on('uncaughtException', (err) => {
   console.error('[Process Uncaught Exception]:', err?.message || err);
 });
@@ -49,7 +69,6 @@ process.on('unhandledRejection', (reason) => {
   console.error('[Process Unhandled Rejection]:', reason?.message || reason);
 });
 
-import path from 'path';
 import {
   makeWASocket,
   useMultiFileAuthState,

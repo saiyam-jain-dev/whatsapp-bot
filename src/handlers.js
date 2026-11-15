@@ -1,5 +1,10 @@
-import { downloadContentFromMessage, downloadMediaMessage } from '@whiskeysockets/baileys';
+import { downloadContentFromMessage, downloadMediaMessage, getMediaKeys, getUrlFromDirectPath } from '@whiskeysockets/baileys';
 import axios from 'axios';
+import https from 'node:https';
+import crypto from 'node:crypto';
+import dns from 'node:dns';
+import fs from 'node:fs';
+import path from 'node:path';
 import { config } from './config.js';
 import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
@@ -7,6 +12,93 @@ import { createSticker, stickerToPhoto, stickerToVideo, stickerToGif, isAnimated
 import { textToVoiceNote } from './tts.js';
 import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
 import { YOUTUBE_REGEX, downloadAndSendYouTubeMedia } from './youtube.js';
+
+const debugLogPath = path.resolve('bot_debug.log');
+function logDebug(message, data) {
+  try {
+    const text = `[${new Date().toISOString()}] ${message} ${data ? (typeof data === 'object' ? JSON.stringify(data) : data) : ''}\n`;
+    fs.appendFileSync(debugLogPath, text);
+  } catch {}
+}
+
+// Dedicated DNS resolver using Google and Cloudflare to completely prevent ISP DNS timeouts
+const mediaDnsResolver = new dns.promises.Resolver();
+mediaDnsResolver.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
+
+const mediaHttpsAgent = new https.Agent({
+  keepAlive: true,
+  lookup: (hostname, options, callback) => {
+    if (typeof options === 'function') {
+      callback = options;
+      options = {};
+    }
+    if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
+      return dns.lookup(hostname, options, callback);
+    }
+    mediaDnsResolver.resolve4(hostname).then(addresses => {
+      if (!addresses || addresses.length === 0) throw new Error('No IPv4');
+      if (options && options.all) {
+        callback(null, addresses.map(a => ({ address: a, family: 4 })));
+      } else {
+        callback(null, addresses[0], 4);
+      }
+    }).catch(() => {
+      mediaDnsResolver.resolve6(hostname).then(addresses => {
+        if (!addresses || addresses.length === 0) throw new Error('No IPv6');
+        if (options && options.all) {
+          callback(null, addresses.map(a => ({ address: a, family: 6 })));
+        } else {
+          callback(null, addresses[0], 6);
+        }
+      }).catch(() => {
+        dns.lookup(hostname, options, callback);
+      });
+    });
+  }
+});
+
+function extractHost(url) {
+  if (!url) return undefined;
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Direct HTTPS download and AES decryption bypassing undici/fetch quirks.
+ */
+async function downloadMediaDirectWithAxios(media, type) {
+  const fallbackHost = extractHost(media.url);
+  const downloadUrl = media.directPath
+    ? getUrlFromDirectPath(media.directPath, fallbackHost)
+    : media.url;
+
+  if (!downloadUrl) {
+    throw new Error('No valid downloadUrl or directPath found in media object');
+  }
+
+  const { cipherKey, iv } = await getMediaKeys(media.mediaKey, type);
+
+  logDebug('[AxiosMedia] Requesting downloadUrl', { downloadUrl, type });
+  const response = await axios.get(downloadUrl, {
+    responseType: 'arraybuffer',
+    httpsAgent: mediaHttpsAgent,
+    headers: {
+      Origin: 'https://web.whatsapp.com'
+    },
+    timeout: 30000
+  });
+
+  const fullBuffer = Buffer.from(response.data);
+  const aesLength = Math.floor(fullBuffer.length / 16) * 16;
+  const ciphertext = fullBuffer.slice(0, aesLength);
+  const decipher = crypto.createDecipheriv('aes-256-cbc', cipherKey, iv);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  logDebug('[AxiosMedia] Decryption succeeded', { plaintextBytes: decrypted.length });
+  return decrypted;
+}
 
 /**
  * Normalizes user JIDs by removing multi-device session tags (e.g. 1234:0@s.whatsapp.net -> 1234@s.whatsapp.net).
@@ -24,16 +116,34 @@ function normalizeJid(jid) {
  * Safely downloads media stream from Baileys message with automatic retries and fallback type.
  */
 async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMsg = null) {
-  console.log(`[DownloadMedia] Downloading media type: "${type}", media details:`, {
+  const details = {
     mimetype: media?.mimetype,
     fileLength: media?.fileLength,
     url: media?.url,
     directPath: media?.directPath,
     hasMediaKey: Boolean(media?.mediaKey),
     isAnimated: media?.isAnimated
-  });
+  };
+  console.log(`[DownloadMedia] Downloading media type: "${type}", media details:`, details);
+  logDebug(`[DownloadMedia] Starting download for ${type}`, details);
 
   let lastErr = null;
+
+  // Primary Method: Direct Axios + Node Crypto (fast, reliable Google/Cloudflare DNS, avoids undici drops)
+  try {
+    const buffer = await downloadMediaDirectWithAxios(media, type);
+    if (buffer && buffer.length > 0) {
+      console.log(`[DownloadMedia] Successfully downloaded & decrypted ${buffer.length} bytes via Axios.`);
+      logDebug(`[DownloadMedia] Axios success, bytes: ${buffer.length}`);
+      return buffer;
+    }
+  } catch (axiosErr) {
+    console.warn(`[DownloadMedia] Direct Axios failed: ${axiosErr.message}. Trying Baileys stream...`);
+    logDebug('[DownloadMedia] Direct Axios failed', { message: axiosErr.message, status: axiosErr.response?.status });
+    lastErr = axiosErr;
+  }
+
+  // Method 2: Standard Baileys stream
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const stream = await downloadContentFromMessage(media, type);
@@ -41,23 +151,27 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
       for await (const chunk of stream) {
         chunks.push(chunk);
       }
-      return Buffer.concat(chunks);
+      const result = Buffer.concat(chunks);
+      logDebug(`[DownloadMedia] Baileys stream success on attempt ${attempt}`, { bytes: result.length });
+      return result;
     } catch (err) {
       lastErr = err;
       console.warn(`[DownloadMedia] Attempt ${attempt}/${retries} for type "${type}" failed: ${err.message}`, {
         cause: err?.cause?.message || err?.cause,
         code: err?.code || err?.cause?.code
       });
+      logDebug(`[DownloadMedia] Baileys attempt ${attempt} failed`, { message: err.message, cause: err?.cause });
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 600));
       }
     }
   }
 
-  // Fallback 1: downloadMediaMessage with sock reupload if available
+  // Method 3: downloadMediaMessage with sock reupload if available
   if (fullMsg && sock?.updateMediaMessage) {
     try {
       console.log('[DownloadMedia] Trying downloadMediaMessage with reuploadRequest...');
+      logDebug('[DownloadMedia] Trying downloadMediaMessage with reuploadRequest');
       const buf = await downloadMediaMessage(
         fullMsg,
         'buffer',
@@ -67,14 +181,24 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
           reuploadRequest: sock.updateMediaMessage
         }
       );
-      if (buf && buf.length > 0) return buf;
+      if (buf && buf.length > 0) {
+        logDebug('[DownloadMedia] reuploadRequest success', { bytes: buf.length });
+        return buf;
+      }
     } catch (dlMsgErr) {
       console.warn(`[DownloadMedia] downloadMediaMessage fallback failed: ${dlMsgErr.message}`);
+      logDebug('[DownloadMedia] reuploadRequest failed', { message: dlMsgErr.message });
     }
   }
 
-  // Fallback 2: for sticker -> image
+  // Method 4: Fallback type for sticker -> image
   if (type === 'sticker') {
+    try {
+      console.log('[DownloadMedia] Trying fallback direct Axios with type "image"...');
+      const buf = await downloadMediaDirectWithAxios(media, 'image');
+      if (buf && buf.length > 0) return buf;
+    } catch {}
+
     try {
       console.log('[DownloadMedia] Trying fallback type "image" for sticker...');
       const stream = await downloadContentFromMessage(media, 'image');
@@ -861,8 +985,10 @@ export async function handleMessage(sock, msg) {
       }
       return;
     } catch (err) {
-      console.error('[Sticker to Media Error]:', err.message);
-      return replyWithTyping(sock, remoteJid, `Could not convert sticker: ${err.message}`, msg);
+      const detailedError = err?.cause ? `${err.message} (${err.cause.code || err.cause.message || err.cause})` : err.message;
+      console.error('[Sticker to Media Error]:', detailedError, err.stack);
+      logDebug('[Sticker to Media Error]', { message: err.message, cause: err.cause, stack: err.stack });
+      return replyWithTyping(sock, remoteJid, `Could not convert sticker: ${detailedError}`, msg);
     }
   }
 
