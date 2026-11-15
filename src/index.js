@@ -1,5 +1,41 @@
-import dns from 'dns';
+import dns from 'node:dns';
+import { Agent, setGlobalDispatcher } from 'undici';
+
 dns.setDefaultResultOrder('ipv4first');
+
+// Setup DNS resolver with public fallbacks (8.8.8.8, 1.1.1.1) to avoid local ISP timeouts on mmg.whatsapp.net
+const dnsResolver = new dns.promises.Resolver();
+dnsResolver.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
+
+const undiciAgent = new Agent({
+  connect: {
+    lookup: (hostname, options, callback) => {
+      if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
+        return dns.lookup(hostname, options, callback);
+      }
+      dnsResolver.resolve4(hostname).then(addresses => {
+        if (!addresses || addresses.length === 0) throw new Error('No IPv4');
+        if (options && options.all) {
+          callback(null, addresses.map(a => ({ address: a, family: 4 })));
+        } else {
+          callback(null, addresses[0], 4);
+        }
+      }).catch(() => {
+        dnsResolver.resolve6(hostname).then(addresses => {
+          if (!addresses || addresses.length === 0) throw new Error('No IPv6');
+          if (options && options.all) {
+            callback(null, addresses.map(a => ({ address: a, family: 6 })));
+          } else {
+            callback(null, addresses[0], 6);
+          }
+        }).catch(() => {
+          dns.lookup(hostname, options, callback);
+        });
+      });
+    }
+  }
+});
+setGlobalDispatcher(undiciAgent);
 
 process.on('uncaughtException', (err) => {
   console.error('[Process Uncaught Exception]:', err?.message || err);

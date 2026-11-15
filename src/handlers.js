@@ -1,9 +1,9 @@
-import { downloadContentFromMessage } from '@whiskeysockets/baileys';
+import { downloadContentFromMessage, downloadMediaMessage } from '@whiskeysockets/baileys';
 import axios from 'axios';
 import { config } from './config.js';
 import { memory } from './memory.js';
 import { askAI, summarizeChat, transcribeAudio } from './ai.js';
-import { createSticker, stickerToPhoto, stickerToVideo, isAnimatedWebp } from './sticker.js';
+import { createSticker, stickerToPhoto, stickerToVideo, stickerToGif, isAnimatedWebp } from './sticker.js';
 import { textToVoiceNote } from './tts.js';
 import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
 import { YOUTUBE_REGEX, downloadAndSendYouTubeMedia } from './youtube.js';
@@ -23,7 +23,7 @@ function normalizeJid(jid) {
 /**
  * Safely downloads media stream from Baileys message with automatic retries and fallback type.
  */
-async function downloadMediaBuffer(media, type, retries = 2) {
+async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMsg = null) {
   let lastErr = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -42,7 +42,26 @@ async function downloadMediaBuffer(media, type, retries = 2) {
     }
   }
 
-  // Fallback for sticker -> image
+  // Fallback 1: downloadMediaMessage with sock reupload if available
+  if (fullMsg && sock?.updateMediaMessage) {
+    try {
+      console.log('[DownloadMedia] Trying downloadMediaMessage with reuploadRequest...');
+      const buf = await downloadMediaMessage(
+        fullMsg,
+        'buffer',
+        {},
+        {
+          logger: { info: () => {}, error: console.error, warn: console.warn, debug: () => {} },
+          reuploadRequest: sock.updateMediaMessage
+        }
+      );
+      if (buf && buf.length > 0) return buf;
+    } catch (dlMsgErr) {
+      console.warn(`[DownloadMedia] downloadMediaMessage fallback failed: ${dlMsgErr.message}`);
+    }
+  }
+
+  // Fallback 2: for sticker -> image
   if (type === 'sticker') {
     try {
       console.log('[DownloadMedia] Trying fallback type "image" for sticker...');
@@ -147,12 +166,12 @@ function isStickerToPhotoIntent(text, firstWord) {
   if (!text) return false;
   const lower = text.toLowerCase().trim();
   const word = (firstWord || '').toLowerCase();
-  if (['photo', 'image', 'video', 'toimg', 'tophoto', 'tovideo'].includes(word)) return true;
-  if (/^(photo|image|video|toimg|tophoto|tovideo)\b/i.test(lower)) return true;
-  if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+stickers?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
-  if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
-  if (/^(convert|turn|extract)(\s+(this|the|a|it))?\s+(in)?to\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
-  if (/^(to|into)\s+(photo|image|pic|picture|video|mp4)/i.test(lower)) return true;
+  if (['photo', 'image', 'video', 'gif', 'toimg', 'tophoto', 'tovideo', 'togif'].includes(word)) return true;
+  if (/^(photo|image|video|gif|toimg|tophoto|tovideo|togif)\b/i.test(lower)) return true;
+  if (/^(convert|turn|make|change|extract)(\s+(this|the|a))?\s+(stickers?\s+)?(in)?to\s+(photo|image|pic|picture|video|mp4|gif)/i.test(lower)) return true;
+  if (/^stickers?\s+(in)?to\s+(photo|image|pic|picture|video|mp4|gif)/i.test(lower)) return true;
+  if (/^(convert|turn|extract)(\s+(this|the|a|it))?\s+(in)?to\s+(photo|image|pic|picture|video|mp4|gif)/i.test(lower)) return true;
+  if (/^(to|into)\s+(photo|image|pic|picture|video|mp4|gif)/i.test(lower)) return true;
   return false;
 }
 
@@ -173,6 +192,14 @@ function findStickerMedia(msg, remoteJid) {
     if (unwrappedQuoted?.stickerMessage) {
       return {
         media: unwrappedQuoted.stickerMessage,
+        fullMessage: {
+          key: {
+            remoteJid,
+            id: contextInfo?.stanzaId,
+            participant: contextInfo?.participant
+          },
+          message: quoted
+        },
         type: 'sticker',
         isAnimated: Boolean(unwrappedQuoted.stickerMessage.isAnimated),
         source: 'quoted'
@@ -184,6 +211,7 @@ function findStickerMedia(msg, remoteJid) {
   if (root?.stickerMessage) {
     return {
       media: root.stickerMessage,
+      fullMessage: msg,
       type: 'sticker',
       isAnimated: Boolean(root.stickerMessage.isAnimated),
       source: 'direct'
@@ -747,7 +775,7 @@ export async function handleMessage(sock, msg) {
 
       let stickerBuffer;
       try {
-        stickerBuffer = await downloadMediaBuffer(target.media, 'sticker');
+        stickerBuffer = await downloadMediaBuffer(target.media, 'sticker', 2, sock, target.fullMessage);
       } catch (dlErr) {
         if (target.source === 'chat_history') {
           return replyWithTyping(
@@ -760,10 +788,30 @@ export async function handleMessage(sock, msg) {
         throw dlErr;
       }
 
+      const wantsGif = /\b(gif|togif)\b/i.test(commandBody) || firstWord === 'gif' || firstWord === 'togif';
       const wantsVideo = /\b(video|tovideo|mp4|anim)\b/i.test(commandBody) || firstWord === 'video' || firstWord === 'tovideo';
       const isAnimated = target.isAnimated || isAnimatedWebp(stickerBuffer);
       const heading = '*SamAi- bot by sammy*';
       const divider = '────────────────────';
+
+      if (wantsGif) {
+        console.log('[Sticker to Media] Converting sticker to animated WhatsApp GIF...');
+        const videoBuffer = await stickerToVideo(stickerBuffer);
+        const caption = `${heading}\n${divider}\n🎞️ *Converted Sticker to GIF*`;
+        try {
+          await sock.sendMessage(
+            remoteJid,
+            { video: videoBuffer, gifPlayback: true, caption },
+            { quoted: msg }
+          );
+        } catch {
+          await sock.sendMessage(
+            remoteJid,
+            { video: videoBuffer, gifPlayback: true, caption }
+          );
+        }
+        return;
+      }
 
       if (wantsVideo || isAnimated) {
         console.log('[Sticker to Media] Converting sticker to MP4 video...');
@@ -781,22 +829,23 @@ export async function handleMessage(sock, msg) {
             { video: videoBuffer, mimetype: 'video/mp4', caption }
           );
         }
-      } else {
-        console.log('[Sticker to Media] Converting sticker to PNG photo...');
-        const photoBuffer = await stickerToPhoto(stickerBuffer);
-        const caption = `${heading}\n${divider}\n🖼️ *Converted Sticker to Photo*`;
-        try {
-          await sock.sendMessage(
-            remoteJid,
-            { image: photoBuffer, caption },
-            { quoted: msg }
-          );
-        } catch {
-          await sock.sendMessage(
-            remoteJid,
-            { image: photoBuffer, caption }
-          );
-        }
+        return;
+      }
+
+      console.log('[Sticker to Media] Converting sticker to PNG photo...');
+      const photoBuffer = await stickerToPhoto(stickerBuffer);
+      const caption = `${heading}\n${divider}\n🖼️ *Converted Sticker to Photo*`;
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          { image: photoBuffer, caption },
+          { quoted: msg }
+        );
+      } catch {
+        await sock.sendMessage(
+          remoteJid,
+          { image: photoBuffer, caption }
+        );
       }
       return;
     } catch (err) {

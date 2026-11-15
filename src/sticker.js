@@ -279,3 +279,15 @@ export async function stickerToVideo(webpBuffer) {
     await fs.unlink(outputPath).catch(() => {});
   }
 }
+
+/**
+ * Converts an animated or static WebP sticker buffer into an animated GIF buffer using Sharp.
+ */
+export async function stickerToGif(webpBuffer) {
+  try {
+    return await sharp(webpBuffer, { animated: true }).gif().toBuffer();
+  } catch (err) {
+    console.warn('[stickerToGif] Animated GIF generation warning:', err.message);
+    return await sharp(webpBuffer, { page: 0 }).gif().toBuffer();
+  }
+}
