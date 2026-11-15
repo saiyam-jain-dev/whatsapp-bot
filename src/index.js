@@ -1,5 +1,18 @@
 import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
+try {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+} catch {}
+
+import { Agent, setGlobalDispatcher } from 'undici';
+setGlobalDispatcher(
+  new Agent({
+    connect: {
+      family: 4,
+      timeout: 30000
+    }
+  })
+);
 
 import path from 'path';
 import {

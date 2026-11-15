@@ -21,6 +21,46 @@ function normalizeJid(jid) {
 }
 
 /**
+ * Safely downloads media stream from Baileys message with automatic retries and fallback type.
+ */
+async function downloadMediaBuffer(media, type, retries = 2) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const stream = await downloadContentFromMessage(media, type);
+      const chunks = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[DownloadMedia] Attempt ${attempt}/${retries} for type "${type}" failed: ${err.message}`);
+      if (attempt < retries) {
+        await new Promise(r => setTimeout(r, 600));
+      }
+    }
+  }
+
+  // Fallback for sticker -> image
+  if (type === 'sticker') {
+    try {
+      console.log('[DownloadMedia] Trying fallback type "image" for sticker...');
+      const stream = await downloadContentFromMessage(media, 'image');
+      const chunks = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
+    } catch (fallbackErr) {
+      console.warn(`[DownloadMedia] Fallback type "image" failed: ${fallbackErr.message}`);
+    }
+  }
+
+  throw lastErr;
+}
+
+/**
  * Unwraps nested WhatsApp message wrappers (ephemeral, viewOnce, documentWithCaption, edited).
  */
 function unwrapMessage(content) {
@@ -363,13 +403,9 @@ async function getAudioBuffer(msg) {
   if (!audioMsg) return null;
 
   try {
-    const stream = await downloadContentFromMessage(audioMsg, 'audio');
-    const chunks = [];
-    for await (const chunk of stream) {
-      chunks.push(chunk);
-    }
+    const buffer = await downloadMediaBuffer(audioMsg, 'audio');
     return {
-      buffer: Buffer.concat(chunks),
+      buffer,
       mimetype: audioMsg.mimetype || 'audio/ogg'
     };
   } catch (err) {
@@ -698,12 +734,7 @@ export async function handleMessage(sock, msg) {
 
     try {
       await sock.sendPresenceUpdate('composing', remoteJid);
-      const stream = await downloadContentFromMessage(target.media, 'sticker');
-      const chunks = [];
-      for await (const chunk of stream) {
-        chunks.push(chunk);
-      }
-      const stickerBuffer = Buffer.concat(chunks);
+      const stickerBuffer = await downloadMediaBuffer(target.media, 'sticker');
       const isAnimated = target.isAnimated || isAnimatedWebp(stickerBuffer);
       const heading = '*SamAi- bot by sammy*';
       const divider = '────────────────────';
@@ -784,12 +815,7 @@ export async function handleMessage(sock, msg) {
       const item = mediaList[i];
       try {
         console.log(`[Sticker] Downloading item ${i + 1}/${count} (type: ${item.type})...`);
-        const stream = await downloadContentFromMessage(item.media, item.type === 'document' ? 'document' : item.type);
-        const chunks = [];
-        for await (const chunk of stream) {
-          chunks.push(chunk);
-        }
-        const mediaBuffer = Buffer.concat(chunks);
+        const mediaBuffer = await downloadMediaBuffer(item.media, item.type === 'document' ? 'document' : item.type);
 
         console.log(`[Sticker] Formatting item ${i + 1}/${count} (${mediaBuffer.length} bytes) to WebP sticker...`);
         const stickerBuffer = await createSticker(mediaBuffer, {

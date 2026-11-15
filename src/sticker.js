@@ -39,7 +39,7 @@ function runFfmpegWebp(inputPath, outputPath, { duration = 3, fps = 14, quality 
       .outputOptions([
         '-vcodec', 'libwebp',
         '-lossless', '0',
-        '-compression_level', '6',
+        '-compression_level', '4',
         '-q:v', String(quality),
         '-loop', '0',
         '-an',
@@ -210,6 +210,7 @@ export async function stickerToVideo(webpBuffer) {
         .inputOptions(['-nostdin', '-y'])
         .outputOptions([
           '-c:v libx264',
+          '-preset ultrafast',
           '-pix_fmt yuv420p',
           '-vf scale=trunc(iw/2)*2:trunc(ih/2)*2',
           '-movflags +faststart'

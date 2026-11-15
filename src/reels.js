@@ -21,6 +21,15 @@ function cleanCache() {
   }
 }
 
+function withTimeout(promise, ms, desc = 'Operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${desc} timed out after ${ms}ms`)), ms)
+    )
+  ]);
+}
+
 /**
  * Extracts downloadable video/image URL from an Instagram Reel or post with multi-tier fallback.
  */
@@ -29,42 +38,48 @@ export async function extractInstagramMedia(reelUrl) {
   let mediaTitle = '';
   let mediaType = 'video';
 
-  // Tier 1: snapsave-media-downloader
+  // Canonicalize URL to https://www.instagram.com/reel/<CODE>/ or clean URL
+  const match = reelUrl.match(INSTAGRAM_REEL_REGEX);
+  const targetUrl = match?.[1]
+    ? `https://www.instagram.com/reel/${match[1]}/`
+    : reelUrl.replace(/[)\].,;!]+$/, '').split('?')[0];
+
+  // Tier 1: scrapr indown scraper (ultra fast, ~1-2s)
   try {
-    const res = await snapsave(reelUrl);
-    if (res.success && res.data?.media?.length) {
-      const item = res.data.media.find(m => m.type === 'video') || res.data.media[0];
+    const res = await withTimeout(scrapr.instagram.indown(targetUrl), 4500, 'indown');
+    if (res.status && res.result?.downloads?.length) {
+      const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
       if (item?.url) {
         videoUrl = item.url;
         mediaType = item.type || 'video';
-        if (res.data.description) mediaTitle = res.data.description.slice(0, 100);
+        if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
       }
     }
   } catch (err) {
-    console.warn('[IG Reel] snapsave attempt failed:', err.message);
+    console.warn('[IG Reel] indown attempt failed:', err.message);
   }
 
-  // Tier 2: scrapr indown scraper
+  // Tier 2: snapsave-media-downloader (fast secondary fallback, 5s timeout)
   if (!videoUrl) {
     try {
-      const res = await scrapr.instagram.indown(reelUrl);
-      if (res.status && res.result?.downloads?.length) {
-        const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
+      const res = await withTimeout(snapsave(targetUrl), 5000, 'snapsave');
+      if (res.success && res.data?.media?.length) {
+        const item = res.data.media.find(m => m.type === 'video') || res.data.media[0];
         if (item?.url) {
           videoUrl = item.url;
           mediaType = item.type || 'video';
-          if (res.result.title) mediaTitle = res.result.title.slice(0, 100);
+          if (res.data.description) mediaTitle = res.data.description.slice(0, 100);
         }
       }
     } catch (err) {
-      console.warn('[IG Reel] indown attempt failed:', err.message);
+      console.warn('[IG Reel] snapsave attempt failed:', err.message);
     }
   }
 
   // Tier 3: scrapr direct embed scraper
   if (!videoUrl) {
     try {
-      const res = await scrapr.instagram.direct(reelUrl);
+      const res = await withTimeout(scrapr.instagram.direct(targetUrl), 4000, 'direct');
       if (res.status && res.result?.downloads?.length) {
         const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
         if (item?.url) {
@@ -81,7 +96,7 @@ export async function extractInstagramMedia(reelUrl) {
   // Tier 4: scrapr snapsave scraper
   if (!videoUrl) {
     try {
-      const res = await scrapr.instagram.snapsave(reelUrl);
+      const res = await withTimeout(scrapr.instagram.snapsave(targetUrl), 4500, 'scrapr snapsave');
       if (res.status && res.result?.downloads?.length) {
         const item = res.result.downloads.find(d => d.type === 'video') || res.result.downloads[0];
         if (item?.url) {
@@ -108,9 +123,11 @@ export async function extractInstagramMedia(reelUrl) {
  * Automatically downloads and delivers an Instagram Reel video or photo directly to the chat.
  */
 export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl) {
-  // Sanitize trailing punctuation from URL
-  const sanitizedUrl = reelUrl.replace(/[)\].,;!]+$/, '');
-  const cleanUrl = sanitizedUrl.split('?')[0];
+  // Sanitize trailing punctuation from URL and get clean canonical URL
+  const match = reelUrl.match(INSTAGRAM_REEL_REGEX);
+  const cleanUrl = match?.[1]
+    ? `https://www.instagram.com/reel/${match[1]}/`
+    : reelUrl.replace(/[)\].,;!]+$/, '').split('?')[0];
 
   cleanCache();
 
@@ -121,7 +138,7 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
   }
   recentDownloads.set(cleanUrl, Date.now());
 
-  console.log(`[IG Reel] Auto-detected Reel URL from ${remoteJid}: ${sanitizedUrl}`);
+  console.log(`[IG Reel] Processing Reel URL from ${remoteJid}: ${cleanUrl}`);
 
   // Send reaction ⏳ to provide immediate feedback that reel is being downloaded
   try {
@@ -129,9 +146,9 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
   } catch {}
 
   try {
-    const extracted = await extractInstagramMedia(sanitizedUrl);
+    const extracted = await extractInstagramMedia(cleanUrl);
     if (!extracted?.videoUrl) {
-      console.warn(`[IG Reel] Could not extract media for: ${sanitizedUrl}`);
+      console.warn(`[IG Reel] Could not extract media for: ${cleanUrl}`);
       try {
         await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
       } catch {}
@@ -140,6 +157,7 @@ export async function downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUr
 
     console.log(`[IG Reel] Downloading media buffer from CDN...`);
     const response = await fetch(extracted.videoUrl, {
+      signal: AbortSignal.timeout(20000),
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
