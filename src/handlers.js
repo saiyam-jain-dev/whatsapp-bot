@@ -24,6 +24,15 @@ function normalizeJid(jid) {
  * Safely downloads media stream from Baileys message with automatic retries and fallback type.
  */
 async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMsg = null) {
+  console.log(`[DownloadMedia] Downloading media type: "${type}", media details:`, {
+    mimetype: media?.mimetype,
+    fileLength: media?.fileLength,
+    url: media?.url,
+    directPath: media?.directPath,
+    hasMediaKey: Boolean(media?.mediaKey),
+    isAnimated: media?.isAnimated
+  });
+
   let lastErr = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -35,7 +44,10 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
       return Buffer.concat(chunks);
     } catch (err) {
       lastErr = err;
-      console.warn(`[DownloadMedia] Attempt ${attempt}/${retries} for type "${type}" failed: ${err.message}`);
+      console.warn(`[DownloadMedia] Attempt ${attempt}/${retries} for type "${type}" failed: ${err.message}`, {
+        cause: err?.cause?.message || err?.cause,
+        code: err?.code || err?.cause?.code
+      });
       if (attempt < retries) {
         await new Promise(r => setTimeout(r, 600));
       }
