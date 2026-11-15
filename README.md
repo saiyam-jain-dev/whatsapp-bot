@@ -15,7 +15,7 @@ Built for chatting with friends, managing rolling group conversation memory, mak
 - **Sub-Second AI Inference**: Uses Groq Llama 3.3 70B (250+ tokens/sec) for instant responses.
 - **Image to Sticker**: Turn any picture into a 512x512 WhatsApp sticker with `!s` or `!sticker`.
 - **Sticker to Photo or Video**: Convert any WhatsApp sticker back into a PNG photo or MP4 video with `!photo` or `!image`.
-- **Zero-Syntax Reel Downloader**: Automatically detects and downloads any shared Instagram Reel link into the chat as an MP4 video without requiring any command or prefix.
+- **Instagram Reel & YouTube Downloader**: Download any Instagram Reel or YouTube Short/video directly into chat using `@sam <link>` or `!reel` / `!yt`.
 - **Catch-Up Summaries**: Run `!summary` or `!tldr` to get a quick bulleted breakdown of recent group messages.
 - **Voice Note Transcription**: Automatically transcribes voice notes via Groq Whisper and answers them.
 - **Anti-Ban Simulation**: Simulates human typing latency (`sendPresenceUpdate('composing')` with randomized 1.0 to 2.5s delay).
@@ -64,7 +64,8 @@ All commands can be invoked using either `@sam` or the traditional `!` prefix:
 | `@sam s` or `!s` | Send photo/GIF with caption `@sam s`, or reply to one with `@sam s` | Converts the photo or GIF into an animated/static WhatsApp sticker |
 | `@sam photo` or `!photo` | Reply to any sticker with `!photo`, or caption with `!photo` | Converts static sticker to PNG photo, or animated sticker to MP4 video |
 | `@sam pfp` or `!pfp` | `@sam pfp @user`, reply with `@sam pfp`, or `@sam pfp 91...` | Fetches the full-resolution profile picture of a group member or yourself |
-| `Instagram Reel Link (Auto)` | Send any `https://www.instagram.com/reel/...` link directly | Automatically downloads and sends the reel video with zero syntax or commands |
+| `@sam <reel-link>` or `!reel` | `@sam https://www.instagram.com/reel/...` or `!reel <link>` | Downloads and sends the Instagram Reel video |
+| `@sam <yt-link>` or `!yt` | `@sam https://youtube.com/shorts/...` or `!yt <link>` | Downloads and sends the YouTube Short or video as an MP4 video |
 | `@sam summary` or `!summary` | `@sam summary` or `@sam tldr` | Generates a 3-5 bullet point summary of recent group chat |
 | `@sam ping` or `!ping` | `@sam ping` | Checks bot status, connection latency, and stored memory count |
 | `@sam clear` or `!clear` | `@sam clear` | Clears recent conversation memory for the current chat |

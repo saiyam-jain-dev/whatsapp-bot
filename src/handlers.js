@@ -6,6 +6,7 @@ import { askAI, summarizeChat, transcribeAudio } from './ai.js';
 import { createSticker, stickerToPhoto, stickerToVideo, isAnimatedWebp } from './sticker.js';
 import { textToVoiceNote } from './tts.js';
 import { INSTAGRAM_REEL_REGEX, downloadAndSendInstagramMedia } from './reels.js';
+import { YOUTUBE_REGEX, downloadAndSendYouTubeMedia } from './youtube.js';
 
 /**
  * Normalizes user JIDs by removing multi-device session tags (e.g. 1234:0@s.whatsapp.net -> 1234@s.whatsapp.net).
@@ -487,16 +488,6 @@ export async function handleMessage(sock, msg) {
     });
   }
 
-  // AUTO-DOWNLOAD INSTAGRAM REEL LINKS:
-  // If any message contains an Instagram Reel URL, automatically download and deliver the video
-  // without requiring any syntax, command prefix, or mention.
-  const igMatch = trimmedText.match(INSTAGRAM_REEL_REGEX);
-  if (igMatch) {
-    const reelUrl = igMatch[0].startsWith('http') ? igMatch[0] : `https://${igMatch[0]}`;
-    await downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl);
-    return;
-  }
-
   // STRICT TRIGGER POLICY:
   // The bot MUST ONLY respond if an explicit command is invoked:
   // 1. Starts with @explaintts
@@ -628,13 +619,14 @@ export async function handleMessage(sock, msg) {
       `• *!s* or *@sam s* - Reply to any photo, GIF, or video to create a sticker\n` +
       `• *!photo* or *@sam photo* - Reply to any sticker to convert it to a photo or video\n` +
       `• *!pfp* or *@sam pfp* - Get profile picture of yourself, tagged member, or replied user\n` +
-      `• *Instagram Reels* - Send any Instagram Reel link directly and it auto-downloads (no command needed!)\n` +
+      `• *!reel <link>* or *@sam <reel-link>* - Download any Instagram Reel as MP4 video\n` +
+      `• *!yt <link>* or *@sam <youtube-link>* - Download any YouTube video or Short as MP4 video\n` +
       `• *!summary* or *@sam summary* - Summarize recent group chat messages\n` +
       `• *!ping* or *@sam ping* - Check bot connection status and latency\n` +
       `• *!clear* or *@sam clear* - Clear rolling chat context memory\n` +
       `• *!help* or *@sam help* - Show this command list\n\n` +
       `*Trigger Policy:*\n` +
-      `SamAi stays silent and never replies to normal group banter unless an Instagram Reel link is shared, or explicitly invoked with *!* or *@sam*.`;
+      `SamAi stays silent and never replies to normal group banter unless explicitly invoked with *!* or *@sam*.`;
     return replyWithTyping(sock, remoteJid, helpText, msg);
   }
 
@@ -1043,53 +1035,91 @@ export async function handleMessage(sock, msg) {
     }
   }
 
-  // 8. Instagram Reel Command (@sam reel, !reel, @sam ig, !ig, @sam download)
-  if (['reel', 'reels', 'ig', 'igdl', 'download'].includes(firstWord)) {
-    let targetUrl = commandArgs;
-    if (!targetUrl) {
-      const quoted = contextInfo?.quotedMessage;
-      if (quoted) {
-        const unwrappedQuoted = unwrapMessage(quoted);
-        const qText =
-          unwrappedQuoted?.conversation ||
-          unwrappedQuoted?.extendedTextMessage?.text ||
-          unwrappedQuoted?.imageMessage?.caption ||
-          unwrappedQuoted?.videoMessage?.caption ||
-          '';
-        const qMatch = qText.match(INSTAGRAM_REEL_REGEX);
-        if (qMatch) {
-          targetUrl = qMatch[0];
-        }
-      }
+  // 8. Instagram Reel Command (@sam <reel-link>, @sam reel, !reel, @sam ig, !ig)
+  const directIgMatch = commandBody.match(INSTAGRAM_REEL_REGEX);
+  const quotedMsgForMedia = contextInfo?.quotedMessage ? unwrapMessage(contextInfo.quotedMessage) : null;
+  const quotedTextForMedia =
+    quotedMsgForMedia?.conversation ||
+    quotedMsgForMedia?.extendedTextMessage?.text ||
+    quotedMsgForMedia?.imageMessage?.caption ||
+    quotedMsgForMedia?.videoMessage?.caption ||
+    '';
+  const quotedIgMatch = quotedTextForMedia.match(INSTAGRAM_REEL_REGEX);
+
+  const isIgIntent =
+    Boolean(directIgMatch) ||
+    ['reel', 'reels', 'ig', 'igdl'].includes(firstWord) ||
+    (firstWord === 'download' && (directIgMatch || quotedIgMatch)) ||
+    (!commandBody && Boolean(quotedIgMatch));
+
+  if (isIgIntent) {
+    console.log(`[Instagram Reel] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+    let targetUrl = directIgMatch ? directIgMatch[0] : commandArgs;
+    if (!targetUrl && quotedIgMatch) {
+      targetUrl = quotedIgMatch[0];
     }
+
     const match = targetUrl?.match(INSTAGRAM_REEL_REGEX);
     if (match) {
       const reelUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
       await downloadAndSendInstagramMedia(sock, msg, remoteJid, reelUrl);
       return;
     }
+
     return replyWithTyping(
       sock,
       remoteJid,
-      `No Instagram Reel link found! You can:\n1. Send any Instagram Reel link directly in chat (no command needed!)\n2. Reply to a message with *@sam reel*\n3. Type *@sam reel <link>*`,
+      `No Instagram Reel link found! You can:\n1. Type *@sam <instagram-reel-link>*\n2. Reply to any Instagram Reel with *@sam* (or *!reel*)\n3. Type *!reel <link>*`,
       msg
     );
   }
 
-  // 9. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
+  // 9. YouTube Video / Short Command (@sam <yt-link>, @sam yt, !yt, !youtube, !short, !shorts)
+  const directYtMatch = commandBody.match(YOUTUBE_REGEX);
+  const quotedYtMatch = quotedTextForMedia.match(YOUTUBE_REGEX);
+
+  const isYtIntent =
+    Boolean(directYtMatch) ||
+    ['yt', 'youtube', 'short', 'shorts', 'ytdl'].includes(firstWord) ||
+    (firstWord === 'download' && (directYtMatch || quotedYtMatch)) ||
+    (!commandBody && Boolean(quotedYtMatch));
+
+  if (isYtIntent) {
+    console.log(`[YouTube Downloader] Triggered by ${senderName} (${remoteJid}) with input: "${commandBody}"`);
+    let targetUrl = directYtMatch ? directYtMatch[0] : commandArgs;
+    if (!targetUrl && quotedYtMatch) {
+      targetUrl = quotedYtMatch[0];
+    }
+
+    const match = targetUrl?.match(YOUTUBE_REGEX);
+    if (match) {
+      const ytUrl = match[0].startsWith('http') ? match[0] : `https://${match[0]}`;
+      await downloadAndSendYouTubeMedia(sock, msg, remoteJid, ytUrl);
+      return;
+    }
+
+    return replyWithTyping(
+      sock,
+      remoteJid,
+      `No YouTube link found! You can:\n1. Type *@sam <youtube-link>*\n2. Reply to any YouTube video or short with *@sam* (or *!yt*)\n3. Type *!yt <link>*`,
+      msg
+    );
+  }
+
+  // 10. Summary / TLDR command (@sam summary, @sam tldr, !summary, !tldr)
   if (firstWord === 'summary' || firstWord === 'tldr') {
     await replyWithTyping(sock, remoteJid, 'Reading recent messages and preparing summary...', msg);
     const summary = await summarizeChat(remoteJid);
     return replyWithTyping(sock, remoteJid, `*📝 Chat Summary:*\n\n${summary}`, msg);
   }
 
-  // 10. Clear command (@sam clear, !clear)
+  // 11. Clear command (@sam clear, !clear)
   if (firstWord === 'clear') {
     memory.clear(remoteJid);
     return replyWithTyping(sock, remoteJid, 'Cleared recent chat history memory for this chat.', msg);
   }
 
-  // 11. Conversational AI Prompt
+  // 12. Conversational AI Prompt
   let promptText = '';
   if (firstWord === 'ai' || firstWord === 'ask') {
     promptText = commandArgs;
