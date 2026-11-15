@@ -32,6 +32,9 @@ const mediaHttpsAgent = new https.Agent({
       callback = options;
       options = {};
     }
+    if (hostname === 'a.whatsapp.net') {
+      hostname = 'mmg.whatsapp.net';
+    }
     if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
       return dns.lookup(hostname, options, callback);
     }
@@ -70,10 +73,14 @@ function extractHost(url) {
  * Direct HTTPS download and AES decryption bypassing undici/fetch quirks.
  */
 async function downloadMediaDirectWithAxios(media, type) {
-  const fallbackHost = extractHost(media.url);
+  let fallbackHost = extractHost(media.url);
+  if (!fallbackHost || fallbackHost === 'a.whatsapp.net') {
+    fallbackHost = 'mmg.whatsapp.net';
+  }
+  const cleanUrl = media.url ? media.url.replace('a.whatsapp.net', 'mmg.whatsapp.net') : null;
   const downloadUrl = media.directPath
     ? getUrlFromDirectPath(media.directPath, fallbackHost)
-    : media.url;
+    : cleanUrl;
 
   if (!downloadUrl) {
     throw new Error('No valid downloadUrl or directPath found in media object');
@@ -129,9 +136,16 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
 
   let lastErr = null;
 
+  const cleanMedia = {
+    ...media,
+    url: (media?.url && media.url.includes('a.whatsapp.net'))
+      ? media.url.replace('a.whatsapp.net', 'mmg.whatsapp.net')
+      : (media?.url || 'https://mmg.whatsapp.net')
+  };
+
   // Primary Method: Direct Axios + Node Crypto (fast, reliable Google/Cloudflare DNS, avoids undici drops)
   try {
-    const buffer = await downloadMediaDirectWithAxios(media, type);
+    const buffer = await downloadMediaDirectWithAxios(cleanMedia, type);
     if (buffer && buffer.length > 0) {
       console.log(`[DownloadMedia] Successfully downloaded & decrypted ${buffer.length} bytes via Axios.`);
       logDebug(`[DownloadMedia] Axios success, bytes: ${buffer.length}`);
@@ -146,7 +160,7 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
   // Method 2: Standard Baileys stream
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const stream = await downloadContentFromMessage(media, type);
+      const stream = await downloadContentFromMessage(cleanMedia, type, { host: 'mmg.whatsapp.net' });
       const chunks = [];
       for await (const chunk of stream) {
         chunks.push(chunk);
@@ -195,13 +209,13 @@ async function downloadMediaBuffer(media, type, retries = 2, sock = null, fullMs
   if (type === 'sticker') {
     try {
       console.log('[DownloadMedia] Trying fallback direct Axios with type "image"...');
-      const buf = await downloadMediaDirectWithAxios(media, 'image');
+      const buf = await downloadMediaDirectWithAxios(cleanMedia, 'image');
       if (buf && buf.length > 0) return buf;
     } catch {}
 
     try {
       console.log('[DownloadMedia] Trying fallback type "image" for sticker...');
-      const stream = await downloadContentFromMessage(media, 'image');
+      const stream = await downloadContentFromMessage(cleanMedia, 'image', { host: 'mmg.whatsapp.net' });
       const chunks = [];
       for await (const chunk of stream) {
         chunks.push(chunk);

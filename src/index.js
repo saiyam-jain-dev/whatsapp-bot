@@ -14,6 +14,9 @@ const undiciAgent = new Agent({
         callback = options;
         options = {};
       }
+      if (hostname === 'a.whatsapp.net') {
+        hostname = 'mmg.whatsapp.net';
+      }
       if (hostname === 'localhost' || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname)) {
         return dns.lookup(hostname, options, callback);
       }
