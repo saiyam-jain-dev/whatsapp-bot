@@ -10,6 +10,9 @@ import scrapr from '@coflyn/scrapr';
  */
 export const YOUTUBE_REGEX = /https?:\/\/(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/|v\/|live\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})[^\s]*/i;
 
+export const MAX_YOUTUBE_DURATION_SECONDS = 1800; // 30 minutes
+export const MAX_YOUTUBE_DURATION_MINUTES = Math.round(MAX_YOUTUBE_DURATION_SECONDS / 60);
+
 /**
  * Downloads a YouTube video or short with multi-tier fallback (yt-dlp first, then web scraper).
  */
@@ -34,11 +37,11 @@ export async function downloadYouTubeVideo(videoUrl) {
       if (meta?.title) title = meta.title;
       if (meta?.duration) duration = meta.duration;
 
-      if (duration > 600) {
-        throw new Error(`Video duration (${Math.round(duration / 60)} mins) exceeds the 10-minute limit for WhatsApp.`);
+      if (duration > MAX_YOUTUBE_DURATION_SECONDS) {
+        throw new Error(`Video duration (${Math.round(duration / 60)} mins) exceeds the ${MAX_YOUTUBE_DURATION_MINUTES}-minute limit for WhatsApp.`);
       }
     } catch (metaErr) {
-      if (metaErr.message?.includes('exceeds the 10-minute limit')) {
+      if (metaErr.message?.includes('exceeds the') && metaErr.message?.includes('limit for WhatsApp')) {
         throw metaErr;
       }
       console.warn('[YouTube] Metadata pre-fetch warning:', metaErr.message);
@@ -46,8 +49,8 @@ export async function downloadYouTubeVideo(videoUrl) {
 
     await youtubedl(videoUrl, {
       output: outPath,
-      format: 'mp4[height<=720]/best[height<=720]/best',
-      maxFilesize: '60M',
+      format: 'best[filesize<=60M]/bestvideo[filesize<=50M][height<=720]+bestaudio/best[height<=720]/best[height<=480]/best[height<=360]/best',
+      maxFilesize: '85M',
       noWarnings: true
     });
 
@@ -55,7 +58,7 @@ export async function downloadYouTubeVideo(videoUrl) {
     console.log(`[YouTube] Download completed via yt-dlp (${buffer.length} bytes).`);
     return { buffer, title, duration };
   } catch (err) {
-    if (err.message?.includes('exceeds the 10-minute limit')) {
+    if (err.message?.includes('exceeds the') && err.message?.includes('limit for WhatsApp')) {
       throw err;
     }
     console.warn('[YouTube] Tier 1 yt-dlp failed, attempting Tier 2 scraper:', err.message);
@@ -75,7 +78,7 @@ export async function downloadYouTubeVideo(videoUrl) {
         const streamRes = await axios.get(vid.url, {
           responseType: 'arraybuffer',
           timeout: 45000,
-          maxContentLength: 60 * 1024 * 1024,
+          maxContentLength: 85 * 1024 * 1024,
           headers: {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -116,26 +119,56 @@ export async function downloadAndSendYouTubeMedia(sock, msg, remoteJid, ytUrl) {
     const caption = `${heading}\n${divider}\n🎥 *${title}*${durationText}\n🔗 ${ytUrl}`;
 
     console.log(`[YouTube] Sending video (${buffer.length} bytes) to ${remoteJid}...`);
-    try {
-      await sock.sendMessage(
-        remoteJid,
-        {
-          video: buffer,
-          mimetype: 'video/mp4',
-          caption
-        },
-        { quoted: msg }
-      );
-    } catch (sendErr) {
-      console.warn('[YouTube] Quoted video send failed, falling back to direct send:', sendErr.message);
-      await sock.sendMessage(
-        remoteJid,
-        {
-          video: buffer,
-          mimetype: 'video/mp4',
-          caption
-        }
-      );
+    const isLarge = buffer.length > 64 * 1024 * 1024;
+    const sanitizedTitle = (title || 'video').replace(/[^\w\s.-]/gi, '').trim() || 'video';
+
+    if (isLarge) {
+      console.log(`[YouTube] File size (${(buffer.length / 1024 / 1024).toFixed(1)}MB) exceeds 64MB direct video limit, sending as video document...`);
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          {
+            document: buffer,
+            mimetype: 'video/mp4',
+            fileName: `${sanitizedTitle}.mp4`,
+            caption
+          },
+          { quoted: msg }
+        );
+      } catch (docErr) {
+        console.warn('[YouTube] Quoted document send failed, sending unquoted:', docErr.message);
+        await sock.sendMessage(
+          remoteJid,
+          {
+            document: buffer,
+            mimetype: 'video/mp4',
+            fileName: `${sanitizedTitle}.mp4`,
+            caption
+          }
+        );
+      }
+    } else {
+      try {
+        await sock.sendMessage(
+          remoteJid,
+          {
+            video: buffer,
+            mimetype: 'video/mp4',
+            caption
+          },
+          { quoted: msg }
+        );
+      } catch (sendErr) {
+        console.warn('[YouTube] Quoted video send failed, falling back to direct send:', sendErr.message);
+        await sock.sendMessage(
+          remoteJid,
+          {
+            video: buffer,
+            mimetype: 'video/mp4',
+            caption
+          }
+        );
+      }
     }
 
     console.log(`[YouTube] Video successfully delivered to ${remoteJid}!`);
@@ -145,7 +178,7 @@ export async function downloadAndSendYouTubeMedia(sock, msg, remoteJid, ytUrl) {
       `${heading}\n${divider}\n` +
       `⚠️ *Could not download YouTube video*\n\n` +
       `*Error:* ${err.message}\n` +
-      `_Tip: Ensure the video is public and under 10 minutes._`;
+      `_Tip: Ensure the video is public and under ${MAX_YOUTUBE_DURATION_MINUTES} minutes._`;
 
     try {
       await sock.sendMessage(remoteJid, { text: errorMsg }, { quoted: msg });
